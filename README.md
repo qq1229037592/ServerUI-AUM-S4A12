@@ -1,7 +1,7 @@
 
 ---
 
-# ServerS4A12 管理工具包 v1.55
+# ServerS4A12 管理工具包 
 
 [AGPL v3.0] [.NET 10.0] [Windows 10/11] [v1.55]
 
