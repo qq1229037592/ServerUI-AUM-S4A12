@@ -237,6 +237,11 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
         }
     }
 
+    # 安全网：robocopy 兜底确保所有新增/变更文件都被同步（防止 Compare API 遗漏部分文件导致编译失败）
+    Write-Host "Safety sync: ensuring all source files are complete..."
+    robocopy "$srcPath" "$SrcRoot" /E /COPY:DAT /DCOPY:T /R:1 /W:1 /XD ".git" /XF "inventory.db" "inventory.db.bak" "start-server.bat" "start-server.sh" /NP /NDL 2>&1 | Out-Null
+    Write-Host "Safety check done."
+
     if ($dbExisted) {
         Copy-Item $DbBackup $DbFile -Force; Remove-Item $DbBackup -Force
         Write-Host "inventory.db restored."
