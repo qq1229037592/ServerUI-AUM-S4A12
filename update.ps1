@@ -298,6 +298,57 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
     }
 
     Write-Host ""
+    Write-Host ">>> GM Tool Sync & Build <<<"
+    Write-Host "在执行更新的时候，会同步更新GM工具"
+    $gmRepo = "https://codeberg.org/rewio/DfoGmTool"
+    $gmDir = Join-Path $ScriptRoot "dfogmtool"
+    $gmExtract = Join-Path $env:TEMP "ServerS4A12-gmtool"
+    $gmBuildOk = $false
+
+    if ($dn) {
+        try {
+            if (Test-Path $gmExtract) { Remove-Item -Recurse -Force $gmExtract }
+            New-Item -ItemType Directory -Path $gmExtract -Force | Out-Null
+            $gmZip = Join-Path $gmExtract "main.zip"
+            $gmSrcDir = Join-Path $gmExtract "extract"
+
+            Write-Host "Downloading GM tool source..."
+            Invoke-WebRequest -Uri "$gmRepo/archive/main.zip" -OutFile $gmZip -UseBasicParsing
+
+            if (-not (Test-Path $gmZip)) {
+                Write-Host "WARNING: GM tool source download failed."
+            } else {
+                Expand-Archive -Path $gmZip -DestinationPath $gmSrcDir -Force
+                $gmSrc = Get-ChildItem -Path $gmSrcDir -Directory | Select-Object -First 1
+
+                if (-not $gmSrc) {
+                    Write-Host "WARNING: GM tool source extraction failed."
+                } else {
+                    Write-Host "Syncing GM tool files..."
+                    robocopy "$($gmSrc.FullName)" $gmDir /E /COPY:DAT /DCOPY:T /R:1 /W:1 /XD ".git" /NP /NDL 2>&1 | Out-Null
+
+                    Write-Host "Compiling GM tool (this may take a while)..."
+                    & $dn publish "$gmDir\DfoGmTool.csproj" -c Release -r win-x64 --self-contained true -o "$gmDir\publish" 2>&1 | Select-Object -Last 3
+
+                    if ($LASTEXITCODE -eq 0) {
+                        $gmExe = Get-Item "$gmDir\publish\DfoGmTool.exe" -ErrorAction SilentlyContinue
+                        if ($gmExe) {
+                            Write-Host "OK - DfoGmTool.exe ($([math]::Round($gmExe.Length/1MB,2)) MB)"
+                            $gmBuildOk = $true
+                        } else {
+                            Write-Host "WARNING: DfoGmTool.exe not found after build."
+                        }
+                    } else { Write-Host "GM tool build failed. Check errors above." }
+                }
+            }
+        } catch {
+            Write-Host "WARNING: GM tool update failed: $_"
+        }
+
+        if (Test-Path $gmExtract) { Remove-Item -Recurse -Force $gmExtract -ErrorAction SilentlyContinue }
+    } else { Write-Host "No .NET SDK, skipping GM tool build." }
+
+    Write-Host ""
     Write-Host ">>> [5/5] Commit log <<<"    # [5/5] 提交日志：从 Codeberg API 拉取所有 commit 历史，按日期分组，写入日志文件
     $allGrouped = @{}
     try {
@@ -327,7 +378,8 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
     Write-Host "========================================"
     Write-Host "$(T 's_done')$modeText"
     Write-Host "  Version: $currentDate | Commits: $totalCommits"
-    if ($buildOk) { Write-Host "  Build: OK" } else { Write-Host "  Build: Skipped" }
+    if ($buildOk) { Write-Host "  Server Build: OK" } else { Write-Host "  Server Build: Skipped" }
+    if ($gmBuildOk) { Write-Host "  GM Tool Build: OK" } else { Write-Host "  GM Tool Build: Skipped" }
     Write-Host "========================================"
     Write-Host ""
 
@@ -339,7 +391,9 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
     [void]$logLines.Add($total + $totalCommits)
     [void]$logLines.Add("方式: " + $modeText)
     $bs = if ($buildOk) { "OK" } else { "Skipped" }
-    [void]$logLines.Add("Build: " + $bs)
+    [void]$logLines.Add("Server Build: " + $bs)
+    $gbs = if ($gmBuildOk) { "OK" } else { "Skipped" }
+    [void]$logLines.Add("GM Tool Build: " + $gbs)
     [void]$logLines.Add("========================================")
     [void]$logLines.Add(""); [void]$logLines.Add($hist); [void]$logLines.Add("")
     foreach ($d in $sortedDates) {
