@@ -307,6 +307,13 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
 
     if ($dn) {
         try {
+            # 停止正在运行的GM工具进程（否则 publish 目录中 DLL 被锁定，编译会失败）
+            $gmExePath = Join-Path $gmDir "publish\DfoGmTool.exe"
+            if (Test-Path $gmExePath) {
+                try { Get-Process -Name "DfoGmTool" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 1 } catch { }
+                Write-Host "Stopped existing GM tool process."
+            }
+
             if (Test-Path $gmExtract) { Remove-Item -Recurse -Force $gmExtract }
             New-Item -ItemType Directory -Path $gmExtract -Force | Out-Null
             $gmZip = Join-Path $gmExtract "main.zip"
@@ -324,7 +331,7 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
                 if (-not $gmSrc) {
                     Write-Host "WARNING: GM tool source extraction failed."
                 } else {
-                    Write-Host "Syncing GM tool files..."
+                    Write-Host "Syncing GM tool files (source from upstream)..."
                     robocopy "$($gmSrc.FullName)" $gmDir /E /COPY:DAT /DCOPY:T /R:1 /W:1 /XD ".git" /NP /NDL 2>&1 | Out-Null
 
                     Write-Host "Compiling GM tool (this may take a while)..."

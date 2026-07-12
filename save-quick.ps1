@@ -5,7 +5,7 @@ $ScriptRoot = $PSScriptRoot
 # 用户拖拽进来的 .db 源文件路径（通过 BAT 传入的第一个参数）
 $SrcFile = $args[0]
 # 游戏实际使用的存档文件路径（要替换的目标文件）
-$DbTarget = Join-Path $ScriptRoot "dist\win-x64\Data\inventory.db"
+$DbTarget = Join-Path $ScriptRoot "ServerS4A12-AUM\dist\win-x64\Data\inventory.db"
 # 旧存档的备份目录（替换前会把当前存档备份到这里）
 $BackupDir = Join-Path $ScriptRoot "存档管理\备份存档"
 
@@ -18,7 +18,7 @@ if (-not $SrcFile -or $SrcFile -eq "") {
     Write-Host "请将 .db 存档文件直接拖拽到【快速换挡.bat】图标上。"
     Write-Host "程序会自动将文件替换为 inventory.db。"
     Write-Host ""
-    Write-Host "目标路径: dist\win-x64\Data\inventory.db"
+    Write-Host "目标路径: ServerS4A12-AUM\dist\win-x64\Data\inventory.db"
     Write-Host "备份路径: 存档管理\备份存档\"
     Write-Host ""
     Write-Host "替换前会自动备份旧存档，支持输入 2 撤销。"

@@ -5,7 +5,7 @@ $ScriptRoot = $PSScriptRoot
 # 切换库目录：存放用户保存的多个存档文件，每个都是一个独立的 .db 档
 $SwitchDir = Join-Path $ScriptRoot "存档管理\切换库"
 # 游戏实际使用的存档文件路径（切换时被替换的目标文件）
-$DbTarget = Join-Path $ScriptRoot "dist\win-x64\Data\inventory.db"
+$DbTarget = Join-Path $ScriptRoot "ServerS4A12-AUM\dist\win-x64\Data\inventory.db"
 # 备份目录：切换前自动把当前游戏存档备份到这里，方便撤销
 $BackupDir = Join-Path $ScriptRoot "存档管理\备份存档"
 
