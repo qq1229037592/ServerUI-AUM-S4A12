@@ -48,7 +48,7 @@ ServerS4A12-管理工具包/
 ├── 开始游戏-ServerUI.exe          # 依赖版入口
 ├── 本地游戏S4.bat                 # 游戏启动脚本
 ├── AUM管理组件\
-│   ├── update.ps1                 # 增量/全量更新脚本
+│   ├── update.ps1                 # 核心脚本，增量/全量更新脚本/输出相关
 │   ├── save-quick.ps1             # 快速换挡脚本
 │   ├── save-switch.ps1            # 存档管理脚本
 │   ├── dotnet-install.ps1         # .NET SDK官方安装器
