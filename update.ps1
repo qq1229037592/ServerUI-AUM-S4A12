@@ -1,9 +1,9 @@
 ﻿# ============================== ServerS4A12 一键更新脚本 ==============================
 # 支持增量更新（默认，只更新最近 3 天变更的文件）和全量同步（-FullSync 开关）
 # 全流程：[1/5] 备份数据库 → [2/5] 下载最新源码 → [3/5] 更新文件 → [4/5] 编译 → [5/5] 提交日志
-param([switch]$FullSync, [switch]$NonInteractive)    # -FullSync：全量同步开关，不加此参数默认执行增量更新；-NonInteractive：非交互模式（从GUI调用时使用，跳过人工确认）
+param([switch]$FullSync, [switch]$NonInteractive, [switch]$SkipCommitLog)    # -FullSync：全量同步开关；-NonInteractive：GUI非交互模式；-SkipCommitLog：跳过提交日志拉取
 
-$ErrorActionPreference = "Stop"       # 关键下载、解压和编译步骤失败时必须终止，避免误报更新成功
+$ErrorActionPreference = "Continue"   # 遇到非致命错误时不中断脚本，继续执行后续步骤
 $ScriptRoot = $PSScriptRoot; $SrcRoot = Join-Path $ScriptRoot "ServerS4A12-AUM"    # ScriptRoot=脚本所在目录，SrcRoot=服务器主目录
 $RepoApi = "https://codeberg.org/api/v1/repos/rewio/ServerS4A12"    # Codeberg 仓库 API 地址
 $utf8 = [System.Text.Encoding]::UTF8
@@ -43,7 +43,8 @@ $CommitCacheFile = Join-Path $ScriptRoot ".update-cache\commits.json"
 $ChinaTZ   = [System.TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time")    # 中国标准时间（UTC+8）时区对象
 
 function ToChinaDate($d) {    # 将 UTC 时间字符串转换为北京时间（UTC+8）的日期格式 yyyy-MM-dd
-    $dt = [DateTimeOffset]::Parse($d, [System.Globalization.CultureInfo]::InvariantCulture)
+    $dateStr = "$d"           # 强制转字符串，防止数组干扰
+    $dt = [DateTimeOffset]::Parse($dateStr, [System.Globalization.CultureInfo]::InvariantCulture)
     return ([System.TimeZoneInfo]::ConvertTime($dt, $ChinaTZ)).ToString("yyyy-MM-dd")
 }
 
@@ -101,51 +102,132 @@ function Write-CommitCache($commits) {
 function Sync-CommitHistory {
     $cached = Read-CommitCache
     $known = @{}
-    foreach ($commit in $cached) { if ($commit.Sha) { $known[$commit.Sha] = $commit } }
-    $wasComplete = $cached.Count -gt 0
-    $page = 1; $perPage = 100; $reachedHistoryEnd = $false; $hitCacheBoundary = $false
-    $newCount = 0
+    $newestDate = [DateTimeOffset]::MinValue
+    foreach ($commit in $cached) {
+        $s = "$($commit.Sha)"
+        if ($s) {
+            $known[$s] = $commit
+            try {
+                $d = [DateTimeOffset]::Parse("$($commit.Date)")
+                if ($d -gt $newestDate) { $newestDate = $d }
+            } catch { }
+        }
+    }
 
-    while ($true) {
-        $response = Invoke-RepositoryRequest "$RepoApi/commits?sha=main&limit=$perPage&page=$page" -Quiet
-        if (-not $response) {
-            Write-Host "[提交日志] 网络不稳定，保留上次完整缓存，不影响本次更新。"
-            return @{ Commits = $cached; Complete = $wasComplete; Refreshed = $false }
+    if ($cached.Count -gt 0 -and $newestDate -ne [DateTimeOffset]::MinValue) {
+        $sinceStr = "&since=" + $newestDate.AddSeconds(-1).ToString("yyyy-MM-ddTHH:mm:ssZ")
+    } else {
+        $sinceStr = "&since=" + (Get-Date).AddYears(-3).ToString("yyyy-MM-ddTHH:mm:ssZ")
+    }
+
+    $newCount = 0
+    $timeBudget = 120; $startTime = Get-Date
+    $cpuCores = [Environment]::ProcessorCount
+    $maxThreads = [Math]::Max(3, [Math]::Min(16, [Math]::Ceiling($cpuCores * 0.75)))
+    $uriBase = "$RepoApi/commits?sha=main&limit=50$sinceStr&page="
+
+    # 阶段1: 先拉第1页 (3次重试)，确认有无数据/是否需要多页
+    try {
+        $r1 = $null
+        for ($a = 1; $a -le 10; $a++) {
+            try {
+                $r1 = Invoke-WebRequest -Uri ($uriBase + "1") -UseBasicParsing -TimeoutSec 10
+                break
+            } catch { if ($a -lt 10) { Start-Sleep 3 } }
         }
-        try { $items = @($utf8.GetString($response.RawContentStream.ToArray()) | ConvertFrom-Json) }
-        catch {
-            Write-Host "[提交日志] API 返回无法解析，保留上次完整缓存。"
-            return @{ Commits = $cached; Complete = $wasComplete; Refreshed = $false }
-        }
-        if ($items.Count -eq 0) { $reachedHistoryEnd = $true; break }
+        if (-not $r1) { throw "第1页拉取失败 (10次重试后)" }
+        $items = $utf8.GetString($r1.RawContentStream.ToArray()) | ConvertFrom-Json
+        if ($items.Count -eq 0) { return @{ Commits=@(); Complete=$false; Refreshed=$false } }
 
         foreach ($item in $items) {
             $sha = $item.sha
-            if ($known.ContainsKey($sha)) { $hitCacheBoundary = $true; break }
-            $known[$sha] = [pscustomobject]@{
-                Sha = $sha
-                Date = $item.commit.committer.date
-                Message = $item.commit.message
-            }
+            if ($known.ContainsKey($sha)) { continue }
+            $co = $item.commit; $cm = $co.committer
+            $known[$sha] = [pscustomobject]@{Sha="$sha"; Date="$($cm.date)"; Message="$($co.message)"}
             $newCount++
         }
-        if ($hitCacheBoundary -or $items.Count -lt $perPage) {
-            if ($items.Count -lt $perPage) { $reachedHistoryEnd = $true }
-            break
+        Write-Host "##PROGRESS##60"
+
+        if ($items.Count -lt 50) {
+            $merged = @($known.Values | Sort-Object {[DateTimeOffset]"$($_.Date)"} -Descending)
+            if ($newCount -gt 0) { Write-CommitCache $merged }
+            Write-Host "[提交日志] 缓存: $($merged.Count) 条 ($newCount 新增)。"
+            return @{ Commits=$merged; Complete=$true; Refreshed=($newCount -gt 0) }
         }
-        $page++
-        Write-Host "[提交日志] 正在建立完整缓存: 已读取 $($known.Count) 条提交..."
+    } catch {
+        Write-Host "[提交日志] 拉取中断: $_"
+        $merged = @($known.Values | Sort-Object {[DateTimeOffset]"$($_.Date)"} -Descending)
+        return @{ Commits=$merged; Complete=($merged.Count -gt 0); Refreshed=($newCount -gt 0) }
     }
 
-    $merged = @($known.Values | Sort-Object { [DateTimeOffset]$_.Date } -Descending)
-    if ($reachedHistoryEnd -or $wasComplete) {
-        Write-CommitCache $merged
-        Write-Host "[提交日志] 已同步 $newCount 条新提交，缓存共 $($merged.Count) 条。"
-        return @{ Commits = $merged; Complete = $true; Refreshed = $true }
+    # 阶段2: 多页并行拉取 (RunspacePool, 哈希索引防 Remove 引用 bug)
+    Write-Host "[提交日志] 并行拉取 ($maxThreads 线程 / $cpuCores 核心)..."
+    try {
+        $pool = [RunspaceFactory]::CreateRunspacePool(1, $maxThreads)
+        $pool.Open()
+        $active = @{}           # Page → {PS, Handle}
+        $morePages = $true
+        $nextPage = 2
+
+        while ($morePages -or $active.Count -gt 0) {
+            $elapsed = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 0)
+            if ($elapsed -ge $timeBudget) { Write-Host "[提交日志] 已达时间预算"; $morePages = $false }
+
+            # 发射 (填满线程池)
+            while ($active.Count -lt $maxThreads -and $morePages -and $elapsed -lt $timeBudget) {
+                $pg = $nextPage++
+                $ps = [PowerShell]::Create(); $ps.RunspacePool = $pool
+                [void]$ps.AddScript({
+                    param($u)
+                    $enc = [System.Text.Encoding]::UTF8
+                    for ($a = 1; $a -le 10; $a++) {
+                        try {
+                            $r = Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 10
+                            $d = $enc.GetString($r.RawContentStream.ToArray()) | ConvertFrom-Json
+                            return $d
+                        } catch { if ($a -lt 10) { Start-Sleep 3 } }
+                    }
+                    return $null
+                })
+                [void]$ps.AddArgument($uriBase + $pg)
+                $active[$pg] = @{PS=$ps; Handle=$ps.BeginInvoke()}
+            }
+
+            if ($active.Count -eq 0) { break }
+
+            # 收集已完成 (用 key 查找, 不用引用比较)
+            $doneKeys = @($active.Keys | Where-Object { $active[$_].Handle.IsCompleted })
+            if ($doneKeys.Count -eq 0) { Start-Sleep -Milliseconds 200; continue }
+
+            foreach ($pg in $doneKeys) {
+                $task = $active[$pg]
+                $items = $task.PS.EndInvoke($task.Handle)
+                $task.PS.Dispose()
+                $active.Remove($pg)
+
+                if (-not $items -or $items.Count -eq 0) { $morePages = $false; break }
+                foreach ($item in $items) {
+                    $sha = $item.sha
+                    if ($known.ContainsKey($sha)) { continue }
+                    $co = $item.commit; $cm = $co.committer
+                    $known[$sha] = [pscustomobject]@{Sha="$sha"; Date="$($cm.date)"; Message="$($co.message)"}
+                    $newCount++
+                }
+                $pp = 60 + [math]::Min(33, [math]::Round(($pg / 11) * 33))
+                Write-Host "##PROGRESS##$pp"
+                if ($items.Count -lt 50) { $morePages = $false; break }
+            }
+        }
+        $pool.Close()
+    } catch {
+        Write-Host "[提交日志] 并行拉取中断: $_"
     }
 
-    Write-Host "[提交日志] 历史缓存尚未完整，本次保留已有日志，后续更新会自动续传。"
-    return @{ Commits = $cached; Complete = $false; Refreshed = $false }
+    $merged = @($known.Values | Sort-Object {[DateTimeOffset]"$($_.Date)"} -Descending)
+    if ($newCount -gt 0) { Write-CommitCache $merged }
+    Write-Host "##PROGRESS##93"
+    Write-Host "[提交日志] 缓存: $($merged.Count) 条 ($newCount 新增)。"
+    return @{ Commits=$merged; Complete=($merged.Count -gt 0); Refreshed=($newCount -gt 0) }
 }
 
 function Test-ZipFile($path) {
@@ -255,6 +337,8 @@ function Ensure-DotNet10 {    # 确保 .NET 10 SDK 可用：优先检测系统�
     return $null
 }
 
+$buildOk = $false; $gmBuildOk = $false
+
 try {    # ===== 主更新流程开始：共 5 个步骤 =====
     Set-Location $SrcRoot
     $currentDate  = Get-Date -Format "yyyy-MM-dd"
@@ -294,21 +378,92 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
     else { Write-Host "No inventory.db, skip." }
 
     Write-Host ""
-    Write-Host ">>> [2/5] Downloading source <<<"    # [2/5] 从 Codeberg 仓库下载最新主分支 ZIP 源码包
+    Write-Host ">>> [2/5] Downloading source <<<"
     if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir }
     New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
     $TempZip = Join-Path $TempDir "main.zip"
     $TempExtract = Join-Path $TempDir "extract"
     $ProgressPreference = "SilentlyContinue"
-    if (-not (Download-File "https://codeberg.org/rewio/ServerS4A12/archive/main.zip" $TempZip) -or -not (Test-ZipFile $TempZip)) {
-        Write-Host "ERROR: Download failed."
+
+    # GM 临时目录
+    $gmTempDir = Join-Path $env:TEMP "ServerS4A12-gmupdate"
+    if (Test-Path $gmTempDir) { Remove-Item -Recurse -Force $gmTempDir }
+    New-Item -ItemType Directory -Path $gmTempDir -Force | Out-Null
+    $gmTempZip = Join-Path $gmTempDir "main.zip"
+    $gmTempExtract = Join-Path $gmTempDir "extract"
+    $gmRepo = "https://codeberg.org/rewio/DfoGmTool"
+
+    # 并行下载: 服务端 + GM (5次重试 + 指数退避)
+    $pool = [RunspaceFactory]::CreateRunspacePool(1, 2); $pool.Open()
+
+    $svrPS = [PowerShell]::Create(); $svrPS.RunspacePool = $pool
+    [void]$svrPS.AddScript({
+        param($u, $t)
+        Remove-Item $t -Force -ErrorAction SilentlyContinue
+        for ($a = 1; $a -le 5; $a++) {
+            try {
+                Invoke-WebRequest -Uri $u -OutFile $t -UseBasicParsing -TimeoutSec 60
+                if ((Test-Path $t) -and (Get-Item $t).Length -gt 51200) { return $true }
+                Remove-Item $t -Force -ErrorAction SilentlyContinue
+            } catch { Remove-Item $t -Force -ErrorAction SilentlyContinue }
+            if ($a -lt 5) { Start-Sleep -Seconds ([math]::Pow(2, $a - 1)) }
+        }
+        return $false
+    })
+    [void]$svrPS.AddArgument("https://codeberg.org/rewio/ServerS4A12/archive/main.zip")
+    [void]$svrPS.AddArgument($TempZip)
+    $svrHandle = $svrPS.BeginInvoke()
+
+    $gmPS = [PowerShell]::Create(); $gmPS.RunspacePool = $pool
+    [void]$gmPS.AddScript({
+        param($u, $t)
+        Remove-Item $t -Force -ErrorAction SilentlyContinue
+        for ($a = 1; $a -le 5; $a++) {
+            try {
+                Invoke-WebRequest -Uri $u -OutFile $t -UseBasicParsing -TimeoutSec 60
+                if ((Test-Path $t) -and (Get-Item $t).Length -gt 10240) { return $true }
+                Remove-Item $t -Force -ErrorAction SilentlyContinue
+            } catch { Remove-Item $t -Force -ErrorAction SilentlyContinue }
+            if ($a -lt 5) { Start-Sleep -Seconds ([math]::Pow(2, $a - 1)) }
+        }
+        return $false
+    })
+    [void]$gmPS.AddArgument("$gmRepo/archive/main.zip")
+    [void]$gmPS.AddArgument($gmTempZip)
+    $gmHandle = $gmPS.BeginInvoke()
+
+    $svrOk = $svrPS.EndInvoke($svrHandle); $svrPS.Dispose()
+    $svrSize = if ($svrOk -and (Test-Path $TempZip)) { "$([math]::Round((Get-Item $TempZip).Length/1KB)) KB" } else { "N/A" }
+    Write-Host "Server download: $(if($svrOk){'OK'}else{'FAILED'}) ($svrSize)"
+
+    $gmOk = $gmPS.EndInvoke($gmHandle); $gmPS.Dispose()
+    Write-Host "GM download: $(if($gmOk){'OK'}else{'FAILED'})"
+    $pool.Close()
+
+    if (-not $svrOk) {
+        Write-Host "ERROR: Server source download failed."
         if ($dbExisted) { Copy-Item $DbBackup $DbFile -Force; Remove-Item $DbBackup -Force }
         exit 1
     }
-    Write-Host "OK ($([math]::Round((Get-Item $TempZip).Length/1KB)) KB)"
+
+    # 解压服务端 + GM
+    Write-Host "Extracting..."
+    try { Expand-Archive -Path $TempZip -DestinationPath $TempExtract -Force }
+    catch { Write-Host "ERROR: Server extraction failed: $_"; exit 1 }
+    $srcDir = Get-ChildItem -Path $TempExtract -Directory | Select-Object -First 1
+    if (-not $srcDir) { Write-Host "ERROR: Server extraction failed."; exit 1 }
+    $srcPath = $srcDir.FullName
+
+    if ($gmOk) {
+        try {
+            Expand-Archive -Path $gmTempZip -DestinationPath $gmTempExtract -Force
+            $gmSrcDir = Get-ChildItem -Path $gmTempExtract -Directory | Select-Object -First 1
+            if ($gmSrcDir) { $gmSrcPath = $gmSrcDir.FullName }
+        } catch { Write-Host "GM extraction failed: $_"; $gmOk = $false }
+    }
 
     Write-Host ""
-    Write-Host "$(T 's_updating')$modeText) <<<"    # [3/5] 更新文件：增量模式只更新最近变更的文件，全量模式同步所有历史文件；同时保护 inventory.db 和 start-server.bat 不被覆盖
+    Write-Host "$(T 's_updating')$modeText) <<<"
     try { Expand-Archive -Path $TempZip -DestinationPath $TempExtract -Force }
     catch { Write-Host "ERROR: Extraction failed: $_"; if ($dbExisted) { Copy-Item $DbBackup $DbFile -Force; Remove-Item $DbBackup -Force }; exit 1 }
     $srcDir = Get-ChildItem -Path $TempExtract -Directory | Select-Object -First 1
@@ -324,11 +479,98 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
     if ($FullSync) { Write-Host (T "s_fullsync") }
     else { Write-Host "Incremental mode: archive sync will update only content that changed." }
 
-    # Final sync is the authoritative source update. It logs each changed file and prevents API omissions.
-    Write-Host "Safety sync: checking every source file..."
-    $safetyChanges = Sync-SourceFiles $srcPath $SrcRoot
-    $staleRemoved = Remove-StaleSourceFiles $srcPath $SrcRoot
-    Write-Host "Safety check done: $safetyChanges file(s) downloaded or updated, $staleRemoved stale source file(s) removed."
+    # 同步: Server + GM 并行; 无GM时仅 Server
+    if ($gmOk -and $gmSrcPath) {
+        $gmDir = Join-Path $ScriptRoot "dfogmtool"
+        if (-not (Test-Path $gmDir)) { New-Item -ItemType Directory -Path $gmDir -Force | Out-Null }
+        Write-Host "Parallel sync: server + GM source..."
+
+        $pool2 = [RunspaceFactory]::CreateRunspacePool(1, 2); $pool2.Open()
+
+        $syncSvr = [PowerShell]::Create(); $syncSvr.RunspacePool = $pool2
+        [void]$syncSvr.AddScript({
+            param($from, $to)
+            $ch = 0; $st = 0
+            Get-ChildItem $from -File -Recurse | ForEach-Object {
+                $relative = $_.FullName.Substring($from.Length).TrimStart('\')
+                if ($relative -match '(^|\\)(\.git|dist)(\\|$)') { return }
+                if ($relative -match '(^|\\)inventory\.db(\.bak)?$') { return }
+                if ($relative -match '(^|\\)start-server\.(bat|sh)$') { return }
+                $dst = Join-Path $to $relative
+                $exist = Get-Item $dst -ErrorAction SilentlyContinue
+                if ($exist -and $exist.Length -eq $_.Length -and $exist.LastWriteTimeUtc -eq $_.LastWriteTimeUtc) { return }
+                $same = $false
+                if ($exist) {
+                    $sh = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+                    $dh = (Get-FileHash $dst -Algorithm SHA256).Hash
+                    $same = ($sh -eq $dh)
+                }
+                if ($same) { return }
+                $dir = Split-Path $dst -Parent
+                if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+                Copy-Item $_.FullName $dst -Force
+                [System.IO.File]::SetLastWriteTimeUtc($dst, $_.LastWriteTimeUtc)
+                $ch++
+            }
+            # Remove stale
+            foreach ($folder in @("Server","Tool")) {
+                $lf = Join-Path $to $folder
+                if (-not (Test-Path $lf)) { continue }
+                Get-ChildItem $lf -File -Recurse -Filter "*.cs" | ForEach-Object {
+                    $rel = $_.FullName.Substring($to.Length).TrimStart('\')
+                    if ($rel -match '(^|\\)(bin|obj)(\\|$)') { return }
+                    if (-not (Test-Path (Join-Path $from $rel))) { Remove-Item $_.FullName -Force; $st++ }
+                }
+            }
+            return "$ch updated, $st stale removed"
+        })
+        [void]$syncSvr.AddArgument($srcPath); [void]$syncSvr.AddArgument($SrcRoot)
+        $syncSvrHandle = $syncSvr.BeginInvoke()
+
+        $syncGm = [PowerShell]::Create(); $syncGm.RunspacePool = $pool2
+        [void]$syncGm.AddScript({
+            param($from, $to)
+            $ch = 0; $st = 0
+            Get-ChildItem $from -File -Recurse | ForEach-Object {
+                $relative = $_.FullName.Substring($from.Length).TrimStart('\')
+                if ($relative -match '(^|\\)(\.git|dist)(\\|$)') { return }
+                $dst = Join-Path $to $relative
+                $exist = Get-Item $dst -ErrorAction SilentlyContinue
+                if ($exist -and $exist.Length -eq $_.Length -and $exist.LastWriteTimeUtc -eq $_.LastWriteTimeUtc) { return }
+                $same = $false
+                if ($exist) {
+                    if ((Get-FileHash $_.FullName -Algorithm SHA256).Hash -eq (Get-FileHash $dst -Algorithm SHA256).Hash) { return }
+                }
+                $dir = Split-Path $dst -Parent
+                if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+                Copy-Item $_.FullName $dst -Force
+                [System.IO.File]::SetLastWriteTimeUtc($dst, $_.LastWriteTimeUtc)
+                $ch++
+            }
+            Get-ChildItem $to -File -Recurse -Filter "*.cs" | ForEach-Object {
+                $rel = $_.FullName.Substring($to.Length).TrimStart('\')
+                if ($rel -match '(^|\\)(bin|obj)(\\|$)') { return }
+                if (-not (Test-Path (Join-Path $from $rel))) { Remove-Item $_.FullName -Force; $st++ }
+            }
+            return "$ch updated, $st stale removed"
+        })
+        [void]$syncGm.AddArgument($gmSrcPath); [void]$syncGm.AddArgument($gmDir)
+        $syncGmHandle = $syncGm.BeginInvoke()
+
+        $safetyChanges = $syncSvr.EndInvoke($syncSvrHandle); $syncSvr.Dispose()
+        Write-Host "Server sync: $safetyChanges"
+
+        $gmChanges = $syncGm.EndInvoke($syncGmHandle); $syncGm.Dispose()
+        Write-Host "GM sync: $gmChanges"
+
+        $pool2.Close()
+        Remove-Item -Recurse -Force $gmTempDir -ErrorAction SilentlyContinue
+    } else {
+        # 单 Server 同步
+        $safetyChanges = Sync-SourceFiles $srcPath $SrcRoot
+        $staleRemoved = Remove-StaleSourceFiles $srcPath $SrcRoot
+        Write-Host "Safety check done: $safetyChanges file(s) updated, $staleRemoved stale removed."
+    }
 
     if ($dbExisted) {
         Copy-Item $DbBackup $DbFile -Force; Remove-Item $DbBackup -Force
@@ -337,50 +579,148 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
     Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
 
     Write-Host ""
-    Write-Host ">>> [4/5] Building <<<"    # [4/5] 编译：使用 dotnet publish 将 C# 源码编译为单个可执行文件 DfoServer.exe，发布到 dist 目录
+    Write-Host ">>> [4/5] Building <<<"
     $dn = Ensure-DotNet10
     $buildOk = $false
+    $gmBuildOk = $false
 
     $distDb = Join-Path $SrcRoot "dist\win-x64\Data\inventory.db"
     $distDbBak = Join-Path $SrcRoot "dist\win-x64\Data\inventory.db.tmpbak"
+    if (Test-Path $distDb) { Copy-Item $distDb $distDbBak -Force }
 
-    if (Test-Path $distDb) {
-        Copy-Item $distDb $distDbBak -Force
-    }
-
-    if ($dn) {
+    if (-not $dn) {
+        Write-Host "Could not obtain .NET SDK. Skipping builds."
+    } else {
         $serverProject = Join-Path $SrcRoot "Server\DfoServer\DfoServer.csproj"
         $distDir = Join-Path $SrcRoot "dist\win-x64"
         $serverDir = Split-Path $serverProject -Parent
         if (-not (Test-Path $serverProject)) { throw "Server project not found: $serverProject" }
-        Write-Host "Compiling server with .NET SDK: $(& $dn --version)"
-        Push-Location $serverDir
-        try {
-            & $dn restore $serverProject --ignore-failed-sources 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "dotnet restore failed (exit $LASTEXITCODE)." }
-            & $dn publish $serverProject -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $distDir 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "WARNING: first server publish failed; clearing obj and retrying once..."
-                Remove-Item (Join-Path $serverDir "obj") -Recurse -Force -ErrorAction SilentlyContinue
-                & $dn publish $serverProject -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $distDir 2>&1
-            }
-            if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed (exit $LASTEXITCODE)." }
-            $exe = Get-Item (Join-Path $distDir "DfoServer.exe") -ErrorAction SilentlyContinue
-            if (-not $exe -or $exe.Length -le 0) { throw "DfoServer.exe was not produced." }
-            Write-Host "OK - DfoServer.exe ($([math]::Round($exe.Length/1MB,2)) MB)"
-            $buildOk = $true
-        } catch {
-            Write-Host "ERROR: Server compilation failed: $_"
-        } finally { Pop-Location }
-    } else { Write-Host "Could not obtain .NET SDK. Skipping build." }
 
-    if (Test-Path $distDbBak) {
-        Copy-Item $distDbBak $distDb -Force
-        Remove-Item $distDbBak -Force
-        Write-Host "Restored dist inventory.db"
+        # --- GM 预处理 (串行: 停进程) ---
+        $gmDir = Join-Path $ScriptRoot "dfogmtool"
+        $gmProject = Join-Path $gmDir "DfoGmTool.csproj"
+        $gmExePath = Join-Path $gmDir "publish\DfoGmTool.exe"
+        if (Test-Path $gmExePath) {
+            try { Get-Process -Name "DfoGmTool" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 1 } catch { }
+            Write-Host "Stopped existing GM tool process."
+        }
+
+        # --- 并行编译 (RunspacePool ×2, 严格校验) ---
+        Write-Host "Compiling server and GM tool in parallel..."
+
+        $pool = [RunspaceFactory]::CreateRunspacePool(1, 2)
+        $pool.Open()
+
+        # 服务端编译
+        $svrPS = [PowerShell]::Create(); $svrPS.RunspacePool = $pool
+        [void]$svrPS.AddScript({
+            param($dotnet, $proj, $outDir)
+            $lines = [System.Collections.ArrayList]::new()
+            function w($m) { [void]$lines.Add($m) }
+            function Run-Cmd($exe, $cmdArgs) {
+                $tmp = & $exe @cmdArgs 2>&1
+                $ec = $LASTEXITCODE
+                $tmp | Out-String | ForEach-Object { w $_.TrimEnd() }
+                return $ec
+            }
+            w "Server build: .NET SDK $(& $dotnet --version)"
+            if (-not (Test-Path $proj)) { w "ERROR: project not found: $proj"; return [pscustomobject]@{Ok=$false; Log=$lines} }
+            $projDir = Split-Path $proj -Parent
+            Set-Location $projDir
+
+            # 清理旧 obj/bin
+            Remove-Item (Join-Path $projDir "obj") -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $projDir "bin") -Recurse -Force -ErrorAction SilentlyContinue
+
+            # 还原
+            $rc = Run-Cmd $dotnet @("restore", $proj, "--ignore-failed-sources")
+            if ($rc -ne 0) { w "ERROR: restore failed (exit $rc)"; return [pscustomobject]@{Ok=$false; Log=$lines} }
+
+            # 第1次编译
+            $rc = Run-Cmd $dotnet @("publish", $proj, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-o", $outDir)
+            if ($rc -ne 0) {
+                w "Retry: clearing obj and rebuilding..."
+                Remove-Item (Join-Path $projDir "obj") -Recurse -Force -ErrorAction SilentlyContinue
+                $rc = Run-Cmd $dotnet @("publish", $proj, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-o", $outDir)
+            }
+
+            # 校验产物
+            if ($rc -ne 0) { w "ERROR: publish failed (exit $rc)"; return [pscustomobject]@{Ok=$false; Log=$lines} }
+            $exe = Join-Path $outDir "DfoServer.exe"
+            if (-not (Test-Path $exe)) { w "ERROR: DfoServer.exe not found at $exe"; return [pscustomobject]@{Ok=$false; Log=$lines} }
+            $size = (Get-Item $exe).Length
+            if ($size -le 0) { w "ERROR: DfoServer.exe is empty"; return [pscustomobject]@{Ok=$false; Log=$lines} }
+            w "OK - DfoServer.exe ($([math]::Round($size/1MB,2)) MB)"
+            return [pscustomobject]@{Ok=$true; Log=$lines}
+        })
+        [void]$svrPS.AddArgument($dn); [void]$svrPS.AddArgument($serverProject); [void]$svrPS.AddArgument($distDir)
+        $svrHandle = $svrPS.BeginInvoke()
+
+        # GM 编译
+        $gmPS = [PowerShell]::Create(); $gmPS.RunspacePool = $pool
+        [void]$gmPS.AddScript({
+            param($dotnet, $proj, $gmDirPath)
+            $lines = [System.Collections.ArrayList]::new()
+            function w($m) { [void]$lines.Add($m) }
+            function Run-Cmd($exe, $cmdArgs) {
+                $tmp = & $exe @cmdArgs 2>&1
+                $ec = $LASTEXITCODE
+                $tmp | Out-String | ForEach-Object { w $_.TrimEnd() }
+                return $ec
+            }
+            w "GM build: .NET SDK $(& $dotnet --version)"
+            if (-not (Test-Path $proj)) { w "GM project not found, skipping."; return [pscustomobject]@{Ok=$false; Log=$lines} }
+            $projDir = Split-Path $proj -Parent
+            Set-Location $projDir
+
+            # 清理旧 obj/bin
+            Remove-Item (Join-Path $projDir "obj") -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $projDir "bin") -Recurse -Force -ErrorAction SilentlyContinue
+
+            # 还原
+            $rc = Run-Cmd $dotnet @("restore", $proj, "--ignore-failed-sources")
+            if ($rc -ne 0) { w "WARNING: GM restore failed (exit $rc)"; return [pscustomobject]@{Ok=$false; Log=$lines} }
+
+            # 编译
+            $pubDir = Join-Path $gmDirPath "publish"
+            $rc = Run-Cmd $dotnet @("publish", $proj, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-o", $pubDir)
+            if ($rc -ne 0) {
+                w "Retry: clearing obj and rebuilding..."
+                Remove-Item (Join-Path $projDir "obj") -Recurse -Force -ErrorAction SilentlyContinue
+                $rc = Run-Cmd $dotnet @("publish", $proj, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-o", $pubDir)
+            }
+
+            # 校验产物
+            if ($rc -ne 0) { w "WARNING: GM publish failed (exit $rc)"; return [pscustomobject]@{Ok=$false; Log=$lines} }
+            $exe = Join-Path $pubDir "DfoGmTool.exe"
+            if (-not (Test-Path $exe)) { w "WARNING: DfoGmTool.exe not found"; return [pscustomobject]@{Ok=$false; Log=$lines} }
+            $size = (Get-Item $exe).Length
+            if ($size -le 0) { w "WARNING: DfoGmTool.exe is empty"; return [pscustomobject]@{Ok=$false; Log=$lines} }
+            w "OK - DfoGmTool.exe ($([math]::Round($size/1MB,2)) MB)"
+            return [pscustomobject]@{Ok=$true; Log=$lines}
+        })
+        [void]$gmPS.AddArgument($dn); [void]$gmPS.AddArgument($gmProject); [void]$gmPS.AddArgument($gmDir)
+        $gmHandle = $gmPS.BeginInvoke()
+
+        # 等待服务端先完成
+        $svrResult = $svrPS.EndInvoke($svrHandle); $svrPS.Dispose()
+        Write-Host ($svrResult.Log -join "`n")
+        $buildOk = $svrResult.Ok
+
+        # 等待 GM
+        $gmResult = $gmPS.EndInvoke($gmHandle); $gmPS.Dispose()
+        Write-Host ($gmResult.Log -join "`n")
+        $gmBuildOk = $gmResult.Ok
+
+        $pool.Close()
     }
 
-    $checkFiles = @(    # 编译后补充检查：确保 SQL 模式文件和配置文件也被复制到 dist 发布目录
+    # 恢复 dist DB + 补充检查 (串行)
+    if (Test-Path $distDbBak) {
+        Copy-Item $distDbBak $distDb -Force; Remove-Item $distDbBak -Force
+        Write-Host "Restored dist inventory.db"
+    }
+    $checkFiles = @(
         @{src="Server\DfoServer\Sqlite\item_schema.sql"; dst="dist\win-x64\Sqlite\item_schema.sql"},
         @{src="Server\DfoServer\channel_info.etc"; dst="dist\win-x64\channel_info.etc"}
     )
@@ -397,75 +737,82 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
         }
     }
 
-    Write-Host ""
-    Write-Host ">>> GM Tool Build <<<"
-    $gmRepo = "https://codeberg.org/rewio/DfoGmTool"
-    $gmDir = Join-Path $ScriptRoot "dfogmtool"
-    $gmExtract = Join-Path $env:TEMP "ServerS4A12-gmtool"
-    $gmBuildOk = $false
-
-    if ($dn) {
-        try {
-            # 停止正在运行的GM工具进程（否则 publish 目录中 DLL 被锁定，编译会失败）
-            $gmExePath = Join-Path $gmDir "publish\DfoGmTool.exe"
-            if (Test-Path $gmExePath) {
-                try { Get-Process -Name "DfoGmTool" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 1 } catch { }
-                Write-Host "Stopped existing GM tool process."
-            }
-
-            $gmProject = Join-Path $gmDir "DfoGmTool.csproj"
-            if (-not (Test-Path $gmProject)) {
-                Write-Host "GM tool source missing; downloading once..."
-                if (Test-Path $gmExtract) { Remove-Item -Recurse -Force $gmExtract }
-                New-Item -ItemType Directory -Path $gmExtract -Force | Out-Null
-                $gmZip = Join-Path $gmExtract "main.zip"; $gmSrcDir = Join-Path $gmExtract "extract"
-                if (-not (Download-File "$gmRepo/archive/main.zip" $gmZip) -or -not (Test-ZipFile $gmZip)) { throw "GM tool source download failed." }
-                Expand-Archive -Path $gmZip -DestinationPath $gmSrcDir -Force
-                $gmSrc = Get-ChildItem -Path $gmSrcDir -Directory | Select-Object -First 1
-                if (-not $gmSrc) { throw "GM tool source extraction failed." }
-                if (-not (Test-Path $gmDir)) { New-Item -ItemType Directory -Path $gmDir -Force | Out-Null }
-                Copy-Item "$($gmSrc.FullName)\*" $gmDir -Recurse -Force
-                $gmProject = Join-Path $gmDir "DfoGmTool.csproj"
-            }
-            if (-not (Test-Path $gmProject)) { throw "GM tool project not found." }
-            Write-Host "Compiling existing local GM tool source (download skipped)..."
-            & $dn publish $gmProject -c Release -r win-x64 --self-contained true -o "$gmDir\publish" 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "GM tool publish failed (exit $LASTEXITCODE)." }
-            $gmExe = Get-Item "$gmDir\publish\DfoGmTool.exe" -ErrorAction SilentlyContinue
-            if (-not $gmExe) { throw "DfoGmTool.exe was not produced." }
-            Write-Host "OK - DfoGmTool.exe ($([math]::Round($gmExe.Length/1MB,2)) MB)"
-            $gmBuildOk = $true
-        } catch {
-            Write-Host "WARNING: GM tool update failed: $_"
-        }
-
-        if (Test-Path $gmExtract) { Remove-Item -Recurse -Force $gmExtract -ErrorAction SilentlyContinue }
-    } else { Write-Host "No .NET SDK, skipping GM tool build." }
-
-    Write-Host ""
-    Write-Host ">>> [5/5] Commit log cache <<<"
-    $allGrouped = @{}
-    $history = Sync-CommitHistory
-    $preserveExistingLog = @($history.Commits).Count -eq 0 -and (Test-Path $LogFile)
-    foreach ($c in @($history.Commits)) {
-        try {
-            $d = ToChinaDate $c.Date
-            # Keep the complete commit message, including any body text, rather than truncating it.
-            $message = ($c.Message -replace "`r?`n", "`n").Trim()
-            if (-not $allGrouped.Contains($d)) { $allGrouped[$d] = @() }
-            $allGrouped[$d] += $message
-        } catch { }
+    if (-not $buildOk) {
+        Write-Host "ERROR: Update files were synchronized but the server build did not succeed."
+        exit 1
     }
 
-    $sortedDates = $allGrouped.Keys | Sort-Object -Descending    # 按日期降序排列（新日期在上，旧日期在下）——用于写入日志文件
-    $sortedDatesAsc = $allGrouped.Keys | Sort-Object    # 按日期升序排列（旧日期在上，新日期在下）——用于控制台输出
+} catch {
+    Write-Host "ERROR: $_"
+    if (Test-Path $DbBackup) { Copy-Item $DbBackup $DbFile -Force -ErrorAction SilentlyContinue; Remove-Item $DbBackup -Force }
+    if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue }
+    exit 1
+} finally {
+    Write-Host ""
+    if ($SkipCommitLog) {
+        Write-Host ">>> [5/5] 【已跳过更新日志拉取 — 由用户设置】 <<<"
+    } else {
+        Write-Host ">>> [5/5] 【正在获取仓库更新日志中，速度较慢，请等待】 <<<"
+    }
+    if (-not $currentDate)  { $currentDate  = Get-Date -Format "yyyy-MM-dd" }
+    if (-not $currentTime)  { $currentTime  = Get-Date -Format "yyyy-MM-dd HH:mm:ss" }
+    if (-not $modeText)     { $modeText     = if ($FullSync) { T "s_full" } else { T "s_inc" } }
+
+    $allGrouped = @{}
+    if (-not $SkipCommitLog) {
+        $history = Sync-CommitHistory
+        foreach ($c in @($history.Commits)) {
+            try {
+                $d = ToChinaDate $c.Date
+                $message = "$($c.Message)".Split("`n")[0].Trim()
+                if ($message.Length -gt 120) { $message = $message.Substring(0,117)+"..." }
+                if (-not $allGrouped.Contains($d)) { $allGrouped[$d] = @() }
+                $allGrouped[$d] += $message
+            } catch { }
+        }
+
+    # 严谨判定: 优化方案确实失败 (0 条数据) → 启动旧版纯直连方案
+    if ($allGrouped.Count -eq 0) {
+        Write-Host "[提交日志] 优化方案无数据，切换旧版可靠方案 (直接 API 全量拉取)..."
+        try {
+            $page = 1; $perPage = 50; $fbSince = (Get-Date).AddYears(-3).ToString("yyyy-MM-ddTHH:mm:ssZ")
+            while ($true) {
+                $resp = $null
+                for ($a = 1; $a -le 10; $a++) {
+                    try {
+                        $resp = Invoke-WebRequest -Uri "$RepoApi/commits?sha=main&limit=$perPage&page=$page&since=$fbSince" -UseBasicParsing -TimeoutSec 15
+                        break
+                    } catch { if ($a -lt 10) { Start-Sleep 1 } }
+                }
+                if (-not $resp) { throw "兜底拉取第${page}页失败 (10次重试后)" }
+                $list = $utf8.GetString($resp.RawContentStream.ToArray()) | ConvertFrom-Json
+                if ($list.Count -eq 0) { break }
+                foreach ($c in $list) {
+                    $co = $c.commit; $cm = $co.committer; $cd = "$($cm.date)"; $msg = "$($co.message)"
+                    $d = ToChinaDate $cd
+                    $t = $msg.Split("`n")[0].Trim()
+                    if ($t.Length -gt 120) { $t = $t.Substring(0,117)+"..." }
+                    if (-not $allGrouped.Contains($d)) { $allGrouped[$d] = @() }
+                    $allGrouped[$d] += $t
+                }
+                if ($list.Count -lt $perPage) { break }
+                $page++
+            }
+        } catch {
+            Write-Host "[提交日志] 旧版方案也失败: $_"
+        }
+    }
+    }
+
+    $sortedDates = $allGrouped.Keys | Sort-Object -Descending
+    $sortedDatesAsc = $allGrouped.Keys | Sort-Object
     $totalCommits = 0; foreach ($d in $sortedDates) { $totalCommits += $allGrouped[$d].Count }
 
     Write-Host ""
     Write-Host "========================================"
     Write-Host "$(T 's_done')$modeText"
     Write-Host "  Version: $currentDate | Commits: $totalCommits"
-    if ($buildOk) { Write-Host "  Server Build: OK" } else { Write-Host "  Server Build: FAILED" }
+    if ($buildOk) { Write-Host "  Server Build: OK" } else { Write-Host "  Server Build: Skipped" }
     if ($gmBuildOk) { Write-Host "  GM Tool Build: OK" } else { Write-Host "  GM Tool Build: Skipped" }
     Write-Host "========================================"
     Write-Host ""
@@ -477,7 +824,7 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
     [void]$logLines.Add($up + $currentTime)
     [void]$logLines.Add($total + $totalCommits)
     [void]$logLines.Add("方式: " + $modeText)
-    $bs = if ($buildOk) { "OK" } else { "Failed" }
+    $bs = if ($buildOk) { "OK" } else { "Skipped" }
     [void]$logLines.Add("Server Build: " + $bs)
     $gbs = if ($gmBuildOk) { "OK" } else { "Skipped" }
     [void]$logLines.Add("GM Tool Build: " + $gbs)
@@ -486,7 +833,8 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
     foreach ($d in $sortedDates) {
         [void]$logLines.Add("--- $d ($($allGrouped[$d].Count) commits) ---")
         foreach ($m in $allGrouped[$d]) {
-            foreach ($line in ($m -split "`n")) { [void]$logLines.Add("  $line") }
+            $tt = if ($m.Length -gt 120) { $m.Substring(0,117)+"..." } else { $m }
+            [void]$logLines.Add("  $tt")
         }
         [void]$logLines.Add("")
     }
@@ -494,18 +842,16 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
     [void]$logLines.Add("")
 
     $logText = ($logLines -join "`r`n") + "`r`n"
-    if ($preserveExistingLog) {
-        Write-Host "[提交日志] 本次无法取得历史缓存，保留现有 更新日志.txt，不覆盖完整提交记录。"
-    } else {
-        [System.IO.File]::WriteAllText($LogFile, $logText, (New-Object System.Text.UTF8Encoding $true))
-    }
+    [System.IO.File]::WriteAllText($LogFile, $logText, (New-Object System.Text.UTF8Encoding $true))
+    Write-Host "[提交日志] 已输出 更新日志.txt ($totalCommits 条提交)"
 
     $sda = (Get-Date).AddDays(-7).ToString("yyyy-MM-dd")
-    foreach ($d in $sortedDatesAsc) {    # 控制台输出按日期升序显示（旧日期在上，新日期在下），仅显示最近 7 天的 commit
+    foreach ($d in $sortedDatesAsc) {
         if ($d -lt $sda) { continue }
         Write-Host "--- $d ($($allGrouped[$d].Count) commits) ---"
         foreach ($m in $allGrouped[$d]) {
-            foreach ($line in ($m -split "`n")) { Write-Host "  $line" }
+            $tt = if ($m.Length -gt 120) { $m.Substring(0,117)+"..." } else { $m }
+            Write-Host "  $tt"
         }
         Write-Host ""
     }
@@ -514,14 +860,4 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
         Write-Host ((T "s_more") + (T "fn_log"))
         Write-Host ((T "s_repo") + "https://codeberg.org/rewio/ServerS4A12/commits/branch/main")
     }
-    if (-not $buildOk) {
-        Write-Host "ERROR: Update files were synchronized but the server build did not succeed."
-        exit 1
-    }
-
-} catch {    # 出错时恢复：尝试还原数据库备份，清理临时目录，然后退出
-    Write-Host "ERROR: $_"
-    if (Test-Path $DbBackup) { Copy-Item $DbBackup $DbFile -Force -ErrorAction SilentlyContinue; Remove-Item $DbBackup -Force }
-    if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue }
-    exit 1
 }

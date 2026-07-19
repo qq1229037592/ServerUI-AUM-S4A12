@@ -73,6 +73,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Windows.Forms;
 using Microsoft.VisualBasic;
 using ServerUI.Services;
@@ -111,8 +112,8 @@ public partial class MainForm : Form
 
     // VER = 当前工具版本号 — 显示在窗口标题和启动日志中
     // 每次发版时只需修改这一个值
-    // 【v1.85-1】UI 全面美化版本
-    const string VER = "1.86";
+    // 【v1.86-2】新增运行日志生成、退出清理编译缓存
+    const string VER = "1.86-2";
 
     // ===== 路径计算 =====
     // _bd = EXE 所在目录 (BaseDirectory)
@@ -139,8 +140,8 @@ public partial class MainForm : Form
     Button btOD, btOB, btMD, btSC, btIm, btEx, btUd;
     // 日志工具栏按钮 (复制/清空) + 顶部安装 SDK 按钮 + GM 工具按钮
     Button btCp, btCl, btSdk, btGm;
-    // 复选框 (DX11/DX12/去水印/清理冗余DB)
-    CheckBox cbDx, cbDt, cbDw, cbCl;
+    // 复选框 (DX11/DX12/去水印/清理冗余DB/跳过更新日志)
+    CheckBox cbDx, cbDt, cbDw, cbCl, cbSkipLog;
     // 存档列表
     ListView lv;
     // 日志文本框
@@ -157,9 +158,11 @@ public partial class MainForm : Form
 
     // ===== 状态变量 =====
     int _pv;                              // 进度条当前值 (0-100)
+    int _stepTarget;                      // 当前步骤的目标百分比 (由 OU 分析 [N/5] 设定)
     bool _sa = true;                      // 排序方向: true=正序, false=倒序
     bool _cdBusy;                         // DX 复选框互斥处理中的互斥锁
     bool _orphanLogged;                   // 孤儿进程告警只触发一次 (避免日志刷屏)
+    readonly StringBuilder _logBuilder = new();  // 累积全部运行日志，用于退出时生成文件
 
 
     /*
@@ -1134,7 +1137,7 @@ public partial class MainForm : Form
         // 复制运行日志按钮 — 使用森林绿 (#28A745)，与【开始游戏】同色
         btCp = new Button
         {
-            Text = "复制运行日志", FlatStyle = FlatStyle.Flat,
+            Text = "复制日志", FlatStyle = FlatStyle.Flat,
             BackColor = Gn, ForeColor = Color.White,
             Font = new Font("Microsoft YaHei", 9f),
             MinimumSize = new Size(100, 28),
@@ -1159,6 +1162,7 @@ public partial class MainForm : Form
         {
             Lg(">>> 清空日志", Color.CornflowerBlue);
             rt.Clear();
+            _logBuilder.Clear();
         };
         btCp.Click += (s, e) =>
         {
@@ -1178,6 +1182,24 @@ public partial class MainForm : Form
             }
         };
         lbar.Controls.Add(lbPg);
+        // 跳过更新日志复选框 (与【清理冗余DB】同风格)
+        cbSkipLog = new CheckBox
+        {
+            Text = "跳过更新日志",
+            ForeColor = Or, BackColor = Color.Transparent,
+            Font = new Font("Microsoft YaHei", 8f, FontStyle.Bold),
+            Cursor = Cursors.Hand, AutoSize = true,
+            CheckAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(2, 0, 0, 0),
+            MinimumSize = new Size(0, 22)
+        };
+        cbSkipLog.CheckedChanged += (s, e) =>
+        {
+            Lg(">>> [跳过更新日志] " + (cbSkipLog.Checked ? "已启用 — 下次更新不拉取提交记录" : "已关闭"),
+                cbSkipLog.Checked ? Or : Txt2);
+        };
+        lbar.Controls.Add(cbSkipLog);
+        cbSkipLog.Location = new Point(lbar.Width - 310, 6);
         lbar.Controls.Add(btCp);
         lbar.Controls.Add(btCl);
         lbPg.Location = new Point(10, 10);
@@ -1187,6 +1209,7 @@ public partial class MainForm : Form
         // 工具栏大小改变时重新计算按钮位置
         lbar.Resize += (s, e) =>
         {
+            cbSkipLog.Location = new Point(lbar.Width - 310, 6);
             btCp.Location = new Point(lbar.Width - 200, 4);
             btCl.Location = new Point(lbar.Width - 95, 4);
         };
@@ -1263,11 +1286,12 @@ public partial class MainForm : Form
     //   - 想改变进度条速度? 改 _pt 的 Interval (默认 200ms) 和 _pv++ 逻辑
     void Ti()
     {
-        _pt = new Timer { Interval = 200 };
+        _pt = new Timer { Interval = 500 };
         _pt.Tick += (s, e) =>
         {
-            _pv++;
-            if (_pv >= 95) _pt.Stop();  // 不超过 95% (完成后跳到 100%)
+            if (_pv < _stepTarget && _pv < 95) { _pv++; }
+            else if (_pv < 95) { _pv++; }       // 步骤间慢速推进
+            if (_pv >= 95) _pt.Stop();
             pb.Value = _pv;
             lbPg.Text = "更新进度: " + _pv + "%";
         };
@@ -1294,7 +1318,8 @@ public partial class MainForm : Form
     /*
      * 窗口关闭事件 (Fc)
      * 关闭前弹出确认对话框，确认后清理所有相关进程
-     * 清理顺序: 停止服务端进程树 → 杀 DfoGmTool 进程 → 停止所有定时器
+     * 清理顺序: 终止更新进程 → 停止服务端进程树 → 杀 DfoGmTool 进程 → 停止所有定时器
+     *   → 保存运行日志到文件 → 清理编译缓存 → 清理更新临时目录
      */
     void Fc(object s, FormClosingEventArgs e)
     {
@@ -1303,6 +1328,7 @@ public partial class MainForm : Form
             "确认退出", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
         if (r == DialogResult.Yes)
         {
+            _up.CancelUpdate();
             Lg(">>> 正在关闭所有相关进程...", Color.Gold);
             _sv.Stop();
             try
@@ -1313,8 +1339,69 @@ public partial class MainForm : Form
             catch { }
             _st.Stop(); _pt.Stop(); _ct.Stop();
             Lg(">>> 已清理所有进程", Gn);
+
+            SaveRunningLog();
+            CleanCompileCache();
+            CleanUpdateTemp();
         }
         else e.Cancel = true;  // 用户取消 → 不关闭窗口
+    }
+
+    void SaveRunningLog()
+    {
+        try
+        {
+            var logPath = Path.Combine(_ad, "运行日志.txt");
+            File.WriteAllText(logPath, _logBuilder.ToString(), Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            Lg(">>> 保存运行日志失败: " + ex.Message, Rd);
+        }
+    }
+
+    void CleanCompileCache()
+    {
+        var cacheDirs = new[]
+        {
+            Path.Combine(_ad, "ServerS4A12-AUM", "Server", "DfoServer", "obj"),
+            Path.Combine(_ad, "ServerS4A12-AUM", "Server", "DfoServer", "bin"),
+            Path.Combine(_ad, "dfogmtool", "obj"),
+            Path.Combine(_ad, "dfogmtool", "bin")
+        };
+
+        foreach (var dir in cacheDirs)
+        {
+            try
+            {
+                if (Directory.Exists(dir))
+                {
+                    Directory.Delete(dir, true);
+                    Lg(">>> 已清理编译缓存: " + Path.GetFileName(dir), Gn);
+                }
+            }
+            catch (Exception ex)
+            {
+                Lg(">>> 清理缓存失败 (" + dir + "): " + ex.Message, Or);
+            }
+        }
+    }
+
+    void CleanUpdateTemp()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "ServerS4A12-update");
+        try
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, true);
+                Lg(">>> 已清理更新临时目录", Gn);
+            }
+        }
+        catch (Exception ex)
+        {
+            Lg(">>> 清理更新临时目录失败: " + ex.Message, Or);
+        }
     }
 
     /*
@@ -1432,6 +1519,8 @@ public partial class MainForm : Form
             rt.Invoke(new Action(() => Lg(m, c)));
             return;
         }
+        var line = "[" + DateTime.Now.ToString("HH:mm:ss") + "] " + m;
+        _logBuilder.AppendLine(line);
         rt.SelectionStart = rt.TextLength;
         rt.SelectionLength = 0;
         rt.SelectionColor = Txt;
@@ -2271,7 +2360,9 @@ public partial class MainForm : Form
         }
 
         pb.Visible = true; lbPg.Visible = true;
-        pb.Value = 0; _pv = 0;
+        pb.Value = 0; _pv = 0; _stepTarget = 5;
+        if (cbSkipLog.Checked)
+            Lg(">>> [跳过更新日志] 已启用，本次不拉取仓库提交记录", Or);
         Lg(">>> 开始增量更新 <<<", Color.CornflowerBlue);
         _pt.Start();
 
@@ -2280,7 +2371,7 @@ public partial class MainForm : Form
         try
         {
             await _up.RunIncremental(
-                Path.Combine(_ad, "ServerS4A12-AUM"), _ad);
+                Path.Combine(_ad, "ServerS4A12-AUM"), _ad, cbSkipLog.Checked);
         }
         finally
         {
@@ -2307,7 +2398,9 @@ public partial class MainForm : Form
         }
 
         pb.Visible = true; lbPg.Visible = true;
-        pb.Value = 0; _pv = 0;
+        pb.Value = 0; _pv = 0; _stepTarget = 5;
+        if (cbSkipLog.Checked)
+            Lg(">>> [跳过更新日志] 已启用，本次不拉取仓库提交记录", Or);
         Lg(">>> 开始全量更新 <<<", Color.CornflowerBlue);
         _pt.Start();
 
@@ -2316,7 +2409,7 @@ public partial class MainForm : Form
         try
         {
             await _up.RunFull(
-                Path.Combine(_ad, "ServerS4A12-AUM"), _ad);
+                Path.Combine(_ad, "ServerS4A12-AUM"), _ad, cbSkipLog.Checked);
         }
         finally
         {
@@ -2333,10 +2426,36 @@ public partial class MainForm : Form
      */
     void OU(string m)
     {
+        // 处理进度标记 (##PROGRESS##N)
+        if (m.StartsWith("##PROGRESS##"))
+        {
+            var val = m.Substring("##PROGRESS##".Length);
+            if (int.TryParse(val, out var pct))
+            {
+                if (pct > _pv && pct <= 95)
+                {
+                    _pv = pct - 1;
+                    _stepTarget = pct;
+                }
+                pb.Value = Math.Min(_pv, 95);
+                lbPg.Text = "更新进度: " + pb.Value + "%";
+            }
+            return;
+        }
+
         if (System.Text.RegularExpressions.Regex.IsMatch(m,
             @"^--- \d{4}-\d{2}-\d{2}"))
             Lg(m, Cy);
         else Lg(m);
+
+        var sm = System.Text.RegularExpressions.Regex.Match(m, @"\[(\d)/5\]");
+        if (sm.Success && int.TryParse(sm.Groups[1].Value, out var step))
+        {
+            _stepTarget = step switch { 1 => 5, 2 => 15, 3 => 35, 4 => 55, 5 => 60, _ => _stepTarget };
+            if (_pv < _stepTarget - 3) _pv = _stepTarget - 3;
+            pb.Value = Math.Min(_pv, 95);
+            lbPg.Text = "更新进度: " + pb.Value + "%";
+        }
     }
 
     /*
@@ -2354,8 +2473,13 @@ public partial class MainForm : Form
         pb.Value = 100;
         lbPg.Text = "100%";
         if (ok)
+        {
             LS(">>> 更新完成！如果更新没有效果，"
                 + "请尝试再次点击更新或者全量更新。<<<");
+            Lg("========================================", Cy);
+            Lg("  更新已完成，将在目录【\\AUM管理组件】生成一份运行日志", Color.Gold);
+            Lg("========================================", Cy);
+        }
         else
             Lg(">>> 更新失败，请检查网络连接或查看上方日志。<<<",
                 Color.Orange);

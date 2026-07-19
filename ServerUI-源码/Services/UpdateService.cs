@@ -38,6 +38,15 @@ public class UpdateService
 {
     const string RepositoryApi = "https://codeberg.org/api/v1/repos/rewio/ServerS4A12";
 
+    Process _runningProc;
+
+    public void CancelUpdate()
+    {
+        try { _runningProc?.Kill(); } catch { }
+        try { _runningProc?.Dispose(); } catch { }
+        _runningProc = null;
+    }
+
     public sealed class RepositoryStatus
     {
         public bool Available { get; init; }
@@ -103,10 +112,10 @@ public class UpdateService
      *   workDir   — PowerShell 的工作目录（ServerS4A12-AUM 目录）
      *   scriptDir — update.ps1 所在目录（AUM管理组件\）
      */
-    public async Task RunIncremental(string workDir, string scriptDir)
+    public async Task RunIncremental(string workDir, string scriptDir, bool skipCommitLog = false)
     {
-        // 不带 -FullSync 参数 = 增量模式
-        await RunPowerShell(workDir, Path.Combine(scriptDir, "update.ps1"), "");
+        var args = skipCommitLog ? "-SkipCommitLog" : "";
+        await RunPowerShell(workDir, Path.Combine(scriptDir, "update.ps1"), args);
     }
 
     /*
@@ -115,10 +124,10 @@ public class UpdateService
      * 原理: update.ps1 带上 -FullSync 参数，对比整个仓库历史
      * 调用时机: 用户点击 [全量更新] 按钮
      */
-    public async Task RunFull(string workDir, string scriptDir)
+    public async Task RunFull(string workDir, string scriptDir, bool skipCommitLog = false)
     {
-        // 带 -FullSync 参数 = 全量模式
-        await RunPowerShell(workDir, Path.Combine(scriptDir, "update.ps1"), "-FullSync");
+        var args = "-FullSync" + (skipCommitLog ? " -SkipCommitLog" : "");
+        await RunPowerShell(workDir, Path.Combine(scriptDir, "update.ps1"), args);
     }
 
     /*
@@ -179,10 +188,24 @@ public class UpdateService
 
             using var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
 
-            // 注册数据接收事件：每收到一行输出就触发 OutputReceived
+            var commitLogBuffer = new System.Collections.Generic.List<string>();
+            var inCommitLog = false;
+
             p.OutputDataReceived += (s, a) =>
             {
-                if (!string.IsNullOrEmpty(a.Data))
+                if (string.IsNullOrEmpty(a.Data)) return;
+                if (a.Data.Contains(">>> [5/5]")) { inCommitLog = true; }
+
+                if (a.Data.StartsWith("##PROGRESS##"))
+                {
+                    // 进度标记: 不显示在日志中，由 OU 解析
+                    OutputReceived?.Invoke(a.Data);
+                    return;
+                }
+
+                if (inCommitLog)
+                    commitLogBuffer.Add(a.Data);
+                else
                     OutputReceived?.Invoke(a.Data);
             };
             p.ErrorDataReceived += (s, a) =>
@@ -192,11 +215,14 @@ public class UpdateService
             };
 
             p.Start();
+            _runningProc = p;
             p.BeginOutputReadLine();   // 开始异步读取标准输出
             p.BeginErrorReadLine();    // 开始异步读取错误输出
             p.WaitForExit();           // 等待 PowerShell 进程结束
 
-            // Show the user exactly which source files changed, based on the before/after file metadata.
+            _runningProc = null;
+
+            // 先输出文件变更列表 [FILES]
             var changed = DescribeFileChanges(workDir, before);
             if (changed.Count == 0)
                 OutputReceived?.Invoke("[FILES] 本次未检测到服务端源码文件变更。");
@@ -206,6 +232,10 @@ public class UpdateService
                 foreach (var line in changed)
                     OutputReceived?.Invoke("[FILES] " + line);
             }
+
+            // 再输出缓存的提交日志 (排在 [FILES] 之后)
+            foreach (var line in commitLogBuffer)
+                OutputReceived?.Invoke(line);
 
             // 通过 ExitCode 判断成功或失败
             // 0 = 成功, 非0 = 失败（脚本中 exit 1 时）
