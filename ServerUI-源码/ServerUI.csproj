@@ -10,10 +10,10 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
-    <Version>1.86.5</Version>
-    <AssemblyVersion>1.86.5.0</AssemblyVersion>
-    <FileVersion>1.86.5.0</FileVersion>
-    <InformationalVersion>1.86-5</InformationalVersion>
+    <Version>1.86.7</Version>
+    <AssemblyVersion>1.86.7.0</AssemblyVersion>
+    <FileVersion>1.86.7.0</FileVersion>
+    <InformationalVersion>1.86-7</InformationalVersion>
     <ApplicationIcon>图标EXE.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>

@@ -1,6 +1,6 @@
 /*
  * ==================================================================
-     * 主窗口类 (MainForm.cs) — ServerS4A12 GUI 管理器 v1.86-5
+     * 主窗口类 (MainForm.cs) — ServerS4A12 GUI 管理器 v1.86-7
  * ==================================================================
  *
  * 【功能概览】
@@ -112,8 +112,8 @@ public partial class MainForm : Form
 
     // VER = 当前工具版本号 — 显示在窗口标题和启动日志中
     // 每次发版时只需修改这一个值
-    // 【v1.86-5】接入Codeberg API Token认证
-    const string VER = "1.86-5";
+    // 【v1.86-7】仓库迁移至 gitgud.io，更新API连接
+    const string VER = "1.86-7";
 
     // ===== 路径计算 =====
     // _bd = EXE 所在目录 (BaseDirectory)
@@ -1255,7 +1255,7 @@ public partial class MainForm : Form
         // 仓库链接 (使用强调色 Ac)
         var lr = new LinkLabel
         {
-            Text = "📦 仓库: codeberg.org/rewio/ServerS4A12",
+            Text = "📦 仓库: gitgud.io/rewio/86JP",
             ForeColor = Ac, LinkColor = Ac,
             ActiveLinkColor = Color.White,
             AutoSize = true, Anchor = AnchorStyles.Right,
@@ -1265,7 +1265,7 @@ public partial class MainForm : Form
         {
             Lg(">>> 打开仓库链接", Color.CornflowerBlue);
             Process.Start("explorer.exe",
-                "https://codeberg.org/rewio/ServerS4A12");
+                "https://gitgud.io/rewio/86JP");
         };
 
         r3.Controls.Add(lg, 0, 0);
@@ -2166,7 +2166,7 @@ public partial class MainForm : Form
 
     async System.Threading.Tasks.Task CheckRepositoryConnection()
     {
-        Lg(">>> 正在检测更新仓库连接: codeberg.org ...", Color.CornflowerBlue);
+        Lg(">>> 正在检测更新仓库连接: gitgud.io ...", Color.CornflowerBlue);
         var status = await _up.CheckRepositoryAsync();
         if (!status.Available)
         {
@@ -2440,6 +2440,17 @@ public partial class MainForm : Form
                 pb.Value = Math.Min(_pv, 95);
                 lbPg.Text = "更新进度: " + pb.Value + "%";
             }
+            return;
+        }
+
+        if (m.StartsWith("[FILE:CS]"))
+        {
+            Lg(m.Substring("[FILE:CS]".Length).TrimStart(), Gn);
+            return;
+        }
+        if (m.StartsWith("[FILE:SUM]"))
+        {
+            Lg(m.Substring("[FILE:SUM]".Length).TrimStart(), Or);
             return;
         }
 

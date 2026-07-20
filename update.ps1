@@ -5,8 +5,10 @@ param([switch]$FullSync, [switch]$NonInteractive, [switch]$SkipCommitLog)    # -
 
 $ErrorActionPreference = "Continue"   # 遇到非致命错误时不中断脚本，继续执行后续步骤
 $ScriptRoot = $PSScriptRoot; $SrcRoot = Join-Path $ScriptRoot "ServerS4A12-AUM"    # ScriptRoot=脚本所在目录，SrcRoot=服务器主目录
-$RepoApi = "https://codeberg.org/api/v1/repos/rewio/ServerS4A12"    # Codeberg 仓库 API 地址
+$RepoApi = "https://gitgud.io/api/v4/projects/rewio%2F86JP"    # gitgud.io (GitLab) 仓库 API 地址
 $utf8 = [System.Text.Encoding]::UTF8
+$ApiToken = "ggio_Evb_FDif1lUTVAQkw0zKWG86MQp1OjJjZ3gK.01.101gu1kjc"
+$ApiHeaders = @{ "PRIVATE-TOKEN" = $ApiToken }
 
 # base64 编码的中文字符串字典，避免汉字在控制台/日志中出现乱码
 $b64 = @{
@@ -52,7 +54,7 @@ function Download-File($uri, $target) {
     for ($attempt = 1; $attempt -le 5; $attempt++) {
         try {
             Write-Host "Download attempt $attempt/5: $uri"
-            Invoke-WebRequest -Uri $uri -OutFile $target -UseBasicParsing -TimeoutSec 60
+            Invoke-WebRequest -Uri $uri -OutFile $target -UseBasicParsing -TimeoutSec 60 -Headers $ApiHeaders
             if ((Test-Path $target) -and (Get-Item $target).Length -gt 1024) { return $true }
             throw "Downloaded file is missing or too small."
         } catch {
@@ -68,7 +70,7 @@ function Invoke-RepositoryRequest($uri, [int]$MaxAttempts = 2, [int]$TimeoutSec 
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         try {
             if (-not $Quiet) { Write-Host "[API] Request $attempt/$MaxAttempts" }
-            return Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec $TimeoutSec
+            return Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec $TimeoutSec -Headers $ApiHeaders
         } catch {
             Write-Host "WARNING: API attempt $attempt/$MaxAttempts failed: $_"
             if ($attempt -lt $MaxAttempts) {
@@ -124,14 +126,14 @@ function Sync-CommitHistory {
     $timeBudget = 120; $startTime = Get-Date
     $cpuCores = [Environment]::ProcessorCount
     $maxThreads = [Math]::Max(3, [Math]::Min(16, [Math]::Ceiling($cpuCores * 0.75)))
-    $uriBase = "$RepoApi/commits?sha=main&limit=50$sinceStr&page="
+    $uriBase = "$RepoApi/repository/commits?ref_name=main&per_page=50$sinceStr&page="
 
     # 阶段1: 先拉第1页 (3次重试)，确认有无数据/是否需要多页
     try {
         $r1 = $null
         for ($a = 1; $a -le 10; $a++) {
             try {
-                $r1 = Invoke-WebRequest -Uri ($uriBase + "1") -UseBasicParsing -TimeoutSec 10
+                $r1 = Invoke-WebRequest -Uri ($uriBase + "1") -UseBasicParsing -TimeoutSec 10 -Headers $ApiHeaders
                 break
             } catch { if ($a -lt 10) { Start-Sleep 3 } }
         }
@@ -140,10 +142,9 @@ function Sync-CommitHistory {
         if ($items.Count -eq 0) { return @{ Commits=@(); Complete=$false; Refreshed=$false } }
 
         foreach ($item in $items) {
-            $sha = $item.sha
+            $sha = $item.id
             if ($known.ContainsKey($sha)) { continue }
-            $co = $item.commit; $cm = $co.committer
-            $known[$sha] = [pscustomobject]@{Sha="$sha"; Date="$($cm.date)"; Message="$($co.message)"}
+            $known[$sha] = [pscustomobject]@{Sha="$sha"; Date="$($item.committed_date)"; Message="$($item.title)"}
             $newCount++
         }
         Write-Host "##PROGRESS##60"
@@ -178,11 +179,12 @@ function Sync-CommitHistory {
                 $pg = $nextPage++
                 $ps = [PowerShell]::Create(); $ps.RunspacePool = $pool
                 [void]$ps.AddScript({
-                    param($u)
+                    param($u, $tok)
                     $enc = [System.Text.Encoding]::UTF8
+                    $hdrs = @{ "PRIVATE-TOKEN" = $tok }
                     for ($a = 1; $a -le 10; $a++) {
                         try {
-                            $r = Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 10
+                            $r = Invoke-WebRequest -Uri $u -Headers $hdrs -UseBasicParsing -TimeoutSec 10
                             $d = $enc.GetString($r.RawContentStream.ToArray()) | ConvertFrom-Json
                             return $d
                         } catch { if ($a -lt 10) { Start-Sleep 3 } }
@@ -190,6 +192,7 @@ function Sync-CommitHistory {
                     return $null
                 })
                 [void]$ps.AddArgument($uriBase + $pg)
+                [void]$ps.AddArgument($ApiToken)
                 $active[$pg] = @{PS=$ps; Handle=$ps.BeginInvoke()}
             }
 
@@ -207,10 +210,9 @@ function Sync-CommitHistory {
 
                 if (-not $items -or $items.Count -eq 0) { $morePages = $false; break }
                 foreach ($item in $items) {
-                    $sha = $item.sha
+                    $sha = $item.id
                     if ($known.ContainsKey($sha)) { continue }
-                    $co = $item.commit; $cm = $co.committer
-                    $known[$sha] = [pscustomobject]@{Sha="$sha"; Date="$($cm.date)"; Message="$($co.message)"}
+                    $known[$sha] = [pscustomobject]@{Sha="$sha"; Date="$($item.committed_date)"; Message="$($item.title)"}
                     $newCount++
                 }
                 $pp = 60 + [math]::Min(33, [math]::Round(($pg / 11) * 33))
@@ -242,6 +244,8 @@ function Test-ZipFile($path) {
 
 function Sync-SourceFiles($from, $to) {
     $changes = 0
+    $srcList = [System.Collections.ArrayList]::new()
+    $buildCount = 0; $dataCount = 0; $otherCount = 0
     Get-ChildItem $from -File -Recurse | ForEach-Object {
         $relative = $_.FullName.Substring($from.Length).TrimStart('\')
         if ($relative -match '(^|\\)(\.git|dist)(\\|$)') { return }
@@ -281,12 +285,44 @@ function Sync-SourceFiles($from, $to) {
         }
         if ($updated) {
             $action = if ($existing) { "更新" } else { "下载" }
-            Write-Host "[FILE] $action $relative | 更新日期 $($_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+            $detail = "$action $relative | $($_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+            $ext = [System.IO.Path]::GetExtension($relative).ToLower()
+            $name = [System.IO.Path]::GetFileName($relative).ToLower()
+
+            # 分类: 源码展开 | 构建/数据/其他 汇总
+            if ($ext -in @('.cs','.csproj','.sln','.sql','.xml','.json','.etc','.bat','.sh','.ps1','.md','.txt','.yml','.yaml') -or
+                $name -in @('app.manifest','.gitignore','.gitattributes')) {
+                Write-Host "[FILE:CS] $detail"
+            } elseif ($ext -in @('.dll','.exe','.pdb','.so','.dylib','.lib','.a','.pch','.obj','.ilk','.exp')) {
+                $buildCount++
+            } elseif ($ext -in @('.db','.db-bak','.db-wal','.db-shm','.pvf')) {
+                $dataCount++
+            } else {
+                $otherCount++
+            }
+            [void]$srcList.Add($detail)
             $changes++
         } else {
             Write-Host "ERROR: skipped $relative after 3 failed write attempts."
         }
     }
+
+    # 汇总行
+    if ($buildCount -gt 0) { Write-Host "[FILE:SUM] 构建产物: ${buildCount}个文件重新生成" }
+    if ($dataCount -gt 0)  { Write-Host "[FILE:SUM] 数据文件: ${dataCount}个已同步" }
+    if ($otherCount -gt 0) { Write-Host "[FILE:SUM] 其他文件: ${otherCount}个变更" }
+
+    # 全量详情落盘
+    if ($srcList.Count -gt 0) {
+        $logPath = Join-Path $to "..\文件变更日志.txt"
+        try {
+            $content = "========================================`r`n文件变更日志 - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`r`n========================================`r`n`r$n"
+            foreach ($s in $srcList) { $content += "  $s`r`n" }
+            $content += "`r`n========================================`r`n"
+            [System.IO.File]::WriteAllText($logPath, $content, $utf8)
+        } catch { }
+    }
+
     return $changes
 }
 
@@ -398,11 +434,12 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
 
     $svrPS = [PowerShell]::Create(); $svrPS.RunspacePool = $pool
     [void]$svrPS.AddScript({
-        param($u, $t)
+        param($u, $t, $tok)
         Remove-Item $t -Force -ErrorAction SilentlyContinue
+        $h = @{ "PRIVATE-TOKEN" = $tok }
         for ($a = 1; $a -le 5; $a++) {
             try {
-                Invoke-WebRequest -Uri $u -OutFile $t -UseBasicParsing -TimeoutSec 60
+                Invoke-WebRequest -Uri $u -OutFile $t -Headers $h -UseBasicParsing -TimeoutSec 60
                 if ((Test-Path $t) -and (Get-Item $t).Length -gt 51200) { return $true }
                 Remove-Item $t -Force -ErrorAction SilentlyContinue
             } catch { Remove-Item $t -Force -ErrorAction SilentlyContinue }
@@ -410,8 +447,9 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
         }
         return $false
     })
-    [void]$svrPS.AddArgument("https://codeberg.org/rewio/ServerS4A12/archive/main.zip")
+    [void]$svrPS.AddArgument("https://gitgud.io/api/v4/projects/rewio%2F86JP/repository/archive.zip?sha=main")
     [void]$svrPS.AddArgument($TempZip)
+    [void]$svrPS.AddArgument($ApiToken)
     $svrHandle = $svrPS.BeginInvoke()
 
     $gmPS = [PowerShell]::Create(); $gmPS.RunspacePool = $pool
@@ -605,6 +643,14 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
             Write-Host "Stopped existing GM tool process."
         }
 
+        # 全量保存时间戳 (编译后恢复, 防止 C# 文件检测误报编译产物)
+        $tsSave = @{}
+        @($SrcRoot, $gmDir) | ForEach-Object {
+            Get-ChildItem $_ -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+                $tsSave[$_.FullName] = $_.LastWriteTimeUtc
+            }
+        }
+
         # --- 并行编译 (RunspacePool ×2, 严格校验) ---
         Write-Host "Compiling server and GM tool in parallel..."
 
@@ -628,10 +674,6 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
             $projDir = Split-Path $proj -Parent
             Set-Location $projDir
 
-            # 清理旧 obj/bin
-            Remove-Item (Join-Path $projDir "obj") -Recurse -Force -ErrorAction SilentlyContinue
-            Remove-Item (Join-Path $projDir "bin") -Recurse -Force -ErrorAction SilentlyContinue
-
             # 还原
             $rc = Run-Cmd $dotnet @("restore", $proj, "--ignore-failed-sources")
             if ($rc -ne 0) { w "ERROR: restore failed (exit $rc)"; return [pscustomobject]@{Ok=$false; Log=$lines} }
@@ -639,8 +681,7 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
             # 第1次编译
             $rc = Run-Cmd $dotnet @("publish", $proj, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-o", $outDir)
             if ($rc -ne 0) {
-                w "Retry: clearing obj and rebuilding..."
-                Remove-Item (Join-Path $projDir "obj") -Recurse -Force -ErrorAction SilentlyContinue
+                w "Retry: rebuilding..."
                 $rc = Run-Cmd $dotnet @("publish", $proj, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-p:PublishSingleFile=true", "-p:IncludeNativeLibrariesForSelfExtract=true", "-o", $outDir)
             }
 
@@ -673,10 +714,6 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
             $projDir = Split-Path $proj -Parent
             Set-Location $projDir
 
-            # 清理旧 obj/bin
-            Remove-Item (Join-Path $projDir "obj") -Recurse -Force -ErrorAction SilentlyContinue
-            Remove-Item (Join-Path $projDir "bin") -Recurse -Force -ErrorAction SilentlyContinue
-
             # 还原
             $rc = Run-Cmd $dotnet @("restore", $proj, "--ignore-failed-sources")
             if ($rc -ne 0) { w "WARNING: GM restore failed (exit $rc)"; return [pscustomobject]@{Ok=$false; Log=$lines} }
@@ -685,8 +722,7 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
             $pubDir = Join-Path $gmDirPath "publish"
             $rc = Run-Cmd $dotnet @("publish", $proj, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-o", $pubDir)
             if ($rc -ne 0) {
-                w "Retry: clearing obj and rebuilding..."
-                Remove-Item (Join-Path $projDir "obj") -Recurse -Force -ErrorAction SilentlyContinue
+                w "Retry: rebuilding..."
                 $rc = Run-Cmd $dotnet @("publish", $proj, "-c", "Release", "-r", "win-x64", "--self-contained", "true", "-o", $pubDir)
             }
 
@@ -713,6 +749,13 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
         $gmBuildOk = $gmResult.Ok
 
         $pool.Close()
+    }
+
+    # 恢复时间戳 (防止 C# 文件变更检测误报编译产物)
+    foreach ($path in $tsSave.Keys) {
+        if (Test-Path $path) {
+            try { [System.IO.File]::SetLastWriteTimeUtc($path, $tsSave[$path]) } catch { }
+        }
     }
 
     # 恢复 dist DB + 补充检查 (串行)
@@ -780,7 +823,7 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
                 $resp = $null
                 for ($a = 1; $a -le 10; $a++) {
                     try {
-                        $resp = Invoke-WebRequest -Uri "$RepoApi/commits?sha=main&limit=$perPage&page=$page&since=$fbSince" -UseBasicParsing -TimeoutSec 15
+                        $resp = Invoke-WebRequest -Uri "$RepoApi/repository/commits?ref_name=main&per_page=$perPage&page=$page&since=$fbSince" -Headers $ApiHeaders -UseBasicParsing -TimeoutSec 15
                         break
                     } catch { if ($a -lt 10) { Start-Sleep 1 } }
                 }
@@ -788,7 +831,7 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
                 $list = $utf8.GetString($resp.RawContentStream.ToArray()) | ConvertFrom-Json
                 if ($list.Count -eq 0) { break }
                 foreach ($c in $list) {
-                    $co = $c.commit; $cm = $co.committer; $cd = "$($cm.date)"; $msg = "$($co.message)"
+                    $cd = "$($c.committed_date)"; $msg = "$($c.title)"
                     $d = ToChinaDate $cd
                     $t = $msg.Split("`n")[0].Trim()
                     if ($t.Length -gt 120) { $t = $t.Substring(0,117)+"..." }
@@ -858,6 +901,6 @@ try {    # ===== 主更新流程开始：共 5 个步骤 =====
     if (($sortedDatesAsc | Where-Object { $_ -lt $sda })) {
         Write-Host "---"
         Write-Host ((T "s_more") + (T "fn_log"))
-        Write-Host ((T "s_repo") + "https://codeberg.org/rewio/ServerS4A12/commits/branch/main")
+        Write-Host ((T "s_repo") + "https://gitgud.io/rewio/86JP/-/commits/main")
     }
 }

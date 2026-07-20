@@ -36,7 +36,8 @@ namespace ServerUI.Services;
 
 public class UpdateService
 {
-    const string RepositoryApi = "https://codeberg.org/api/v1/repos/rewio/ServerS4A12";
+    const string RepositoryApi = "https://gitgud.io/api/v4/projects/rewio%2F86JP";
+    const string ApiToken = "ggio_Evb_FDif1lUTVAQkw0zKWG86MQp1OjJjZ3gK.01.101gu1kjc";
 
     Process _runningProc;
 
@@ -62,7 +63,7 @@ public class UpdateService
     // MainForm 订阅此事件，用于停止进度条动画并刷新界面
     public event Action<bool> Completed;
 
-    // Check the same Codeberg API used by update.ps1, so the advice matches the actual update path.
+    // Check the same gitgud.io GitLab API used by update.ps1, so the advice matches the actual update path.
     public async Task<RepositoryStatus> CheckRepositoryAsync()
     {
         var timer = Stopwatch.StartNew();
@@ -73,6 +74,7 @@ public class UpdateService
             try
             {
                 using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
+                client.DefaultRequestHeaders.Add("PRIVATE-TOKEN", ApiToken);
                 using var response = await client.GetAsync(RepositoryApi,
                     HttpCompletionOption.ResponseHeadersRead);
                 if (response.IsSuccessStatusCode)
@@ -105,7 +107,7 @@ public class UpdateService
     /*
      * 增量更新
      * 作用: 只下载最近 72 小时内变更的文件，速度快，适合日常更新
-     * 原理: update.ps1 通过 Codeberg API 获取最近 3 天的 commit，只同步变更的文件
+     * 原理: update.ps1 通过 gitgud.io GitLab API 获取最近 3 天的 commit，只同步变更的文件
      * 调用时机: 用户点击 [增量更新] 按钮
      * 
      * 参数:
