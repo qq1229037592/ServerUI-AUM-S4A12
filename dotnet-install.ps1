@@ -3,6 +3,61 @@
 # Licensed under the MIT license. See LICENSE file in the project root for full license information.
 #
 
+# ==================================================================
+#  .NET SDK 自动安装脚本 — 微软官方脚本（带中文注释版）
+# ==================================================================
+# 本脚本由微软官方提供，用于自动下载和安装 .NET SDK / 运行时。
+# 中文注释由 ServerS4A12-AUM 项目添加，方便新手理解和修改。
+#
+# 【这个脚本是干什么的？】
+#   自动从微软服务器下载并安装指定版本的 .NET SDK 或运行时。
+#   不需要管理员权限，不需要用户交互，适合自动化部署场景。
+#
+# 【在 ServerS4A12 项目中的作用】
+#   ServerUI.exe 配合此脚本，可以为没有安装 .NET 的用户自动下载 SDK。
+#   下载的 SDK 会放在 AUM管理组件\dotnet-sdk 目录下（便携安装）。
+#
+# 【常用命令行示例】
+#   安装最新的 .NET 10 LTS SDK：
+#     .\dotnet-install.ps1 -Channel 10.0 -InstallDir "E:\Game\DXF\AUM管理组件\dotnet-sdk"
+#
+#   安装特定版本的 SDK（例如 8.0.401）：
+#     .\dotnet-install.ps1 -Version 8.0.401 -InstallDir "路径"
+#
+#   只安装 .NET 运行时（不安装 SDK，体积更小）：
+#     .\dotnet-install.ps1 -Runtime dotnet -Channel 10.0
+#
+#   模拟运行（不实际安装，只显示会做什么）：
+#     .\dotnet-install.ps1 -Channel 10.0 -DryRun
+#
+# 【重要参数速查表】
+#   -Channel <版本>    要安装的 .NET 大版本，如 10.0、8.0。默认 LTS
+#   -Version <版本号>  指定精确版本，如 8.0.401。默认 latest
+#   -InstallDir <路径> 安装到哪个目录。默认 %LocalAppData%\Microsoft\dotnet
+#   -Runtime <类型>    只安装运行时（dotnet / aspnetcore / windowsdesktop）
+#   -Architecture <架构> x64 / x86 / arm64。默认自动检测
+#   -DryRun            模拟运行模式，不实际下载安装
+#   -NoPath            不把安装目录加到 PATH 环境变量
+#   -KeepZip           保留下载的安装包（默认安装后删除）
+#   -ProxyAddress      通过代理服务器下载
+#   -DownloadTimeout   下载超时秒数（默认 1200 秒 = 20 分钟）
+#   -Quality <质量>    安装质量版本（daily / preview / GA）。仅和 Channel 配合使用
+#
+# 【如果下载很慢怎么办？】
+#   1. 使用 -ProxyAddress 设置代理
+#   2. 增大 -DownloadTimeout 超时时间
+#   3. 手动从 https://dotnet.microsoft.com/download 下载安装包
+#
+# 【如果想修改默认安装位置】
+#   改下面主流程中的 $InstallRoot 变量计算逻辑，或者
+#   直接用 -InstallDir 命令行参数指定。
+#
+# 【脚本文件末尾的巨大乱码是什么？】
+#   那是微软的代码签名（数字签名块），用于验证脚本未被篡改。
+#   不要修改签名块及其后面的任何内容，否则签名验证会失败。
+#   不过通常不需要验证签名，只要能正常运行就行。
+# ==================================================================
+
 <#
 .SYNOPSIS
     Installs dotnet cli
@@ -106,35 +161,44 @@
 #>
 [cmdletbinding()]
 param(
-    [string]$Channel = "LTS",
-    [string]$Quality,
-    [string]$Version = "Latest",
-    [switch]$Internal,
-    [string]$JSonFile,
-    [Alias('i')][string]$InstallDir = "<auto>",
-    [string]$Architecture = "<auto>",
-    [string]$Runtime,
+    [string]$Channel = "LTS",              # .NET 大版本号，如 10.0、8.0，默认 LTS（长期支持版）
+    [string]$Quality,                       # 质量级别：daily(每日构建)、preview(预览版)、GA(正式版)
+    [string]$Version = "Latest",            # 精确版本号，默认 latest（最新）
+    [switch]$Internal,                      # [内部用] 下载内部构建版本
+    [string]$JSonFile,                      # 从 global.json 文件读取 SDK 版本
+    [Alias('i')][string]$InstallDir = "<auto>",  # 安装目录，默认自动选择
+    [string]$Architecture = "<auto>",       # CPU 架构，默认自动检测（x64/x86/arm64）
+    [string]$Runtime,                       # 只安装运行时：dotnet / aspnetcore / windowsdesktop
     [Obsolete("This parameter may be removed in a future version of this script. The recommended alternative is '-Runtime dotnet'.")]
-    [switch]$SharedRuntime,
-    [switch]$DryRun,
-    [switch]$NoPath,
-    [string]$AzureFeed,
-    [string]$UncachedFeed,
-    [string]$FeedCredential,
-    [string]$ProxyAddress,
-    [switch]$ProxyUseDefaultCredentials,
-    [string[]]$ProxyBypassList = @(),
-    [switch]$SkipNonVersionedFiles,
-    [int]$DownloadTimeout = 1200,
-    [switch]$KeepZip,
-    [string]$ZipPath = [System.IO.Path]::combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName()),
-    [switch]$Help
+    [switch]$SharedRuntime,                 # [已废弃] 请改用 -Runtime dotnet
+    [switch]$DryRun,                        # 模拟运行：只显示会下载什么，不实际安装
+    [switch]$NoPath,                        # 不把安装路径加入 PATH 环境变量
+    [string]$AzureFeed,                     # [内部用] 指定备用下载源
+    [string]$UncachedFeed,                  # [内部用] 指定未缓存的下载源
+    [string]$FeedCredential,                # [内部用] 下载源的访问凭据
+    [string]$ProxyAddress,                  # 代理服务器地址
+    [switch]$ProxyUseDefaultCredentials,    # 代理是否使用默认凭据
+    [string[]]$ProxyBypassList = @(),       # 代理绕过列表（不走代理的地址）
+    [switch]$SkipNonVersionedFiles,         # 跳过已存在的非版本化文件（如 dotnet.exe）
+    [int]$DownloadTimeout = 1200,           # 下载超时（秒），默认 1200 秒 = 20 分钟
+    [switch]$KeepZip,                       # 保留下载的 ZIP 包（默认安装后删除）
+    [string]$ZipPath = [System.IO.Path]::combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName()),  # ZIP 下载保存路径
+    [switch]$Help                           # 显示帮助信息
 )
 
+# ---- 脚本全局设置 ----
+# StrictMode: 强制严格语法检查（变量必须先声明才能用）
 Set-StrictMode -Version Latest
+# 遇到错误立即停止（不继续执行后续代码）
 $ErrorActionPreference = "Stop"
+# 禁止下载进度条输出（避免在日志中刷屏）
 $ProgressPreference = "SilentlyContinue"
 
+# ---- 日志输出函数族 ----
+# Say():      普通信息输出
+# Say-Warning(): 警告信息
+# Say-Error():   错误信息
+# Say-Verbose(): 详细调试信息（需要 -Verbose 参数才能看到）
 function Say($str) {
     try {
         Write-Host "dotnet-install: $str"
@@ -177,12 +241,15 @@ function Say-Verbose($str) {
     }
 }
 
+# ---- 性能计时函数：测量传入的代码块执行耗时 ----
+# 用法：Measure-Action "下载" { DownloadFile ... }
 function Measure-Action($name, $block) {
     $time = Measure-Command $block
     $totalSeconds = $time.TotalSeconds
     Say-Verbose "Action '$name' took $totalSeconds seconds"
 }
 
+# ---- 通过 HTTP HEAD 请求获取远程文件大小（不下载文件本体） ----
 function Get-Remote-File-Size($zipUri) {
     try {
         $response = Invoke-WebRequest -UseBasicParsing -Uri $zipUri -Method Head
@@ -206,6 +273,9 @@ function Say-Invocation($Invocation) {
     Say-Verbose "$command $args"
 }
 
+# ---- 带重试机制的调用包装器 ----
+# 传入一个脚本块，最多重试 $MaxAttempts 次
+# 如果超过 $DownloadTimeout 还没成功，抛出超时异常
 function Invoke-With-Retry([ScriptBlock]$ScriptBlock, [System.Threading.CancellationToken]$cancellationToken = [System.Threading.CancellationToken]::None, [int]$MaxAttempts = 3, [int]$SecondsBetweenAttempts = 1) {
     $Attempts = 0
     $local:startTime = $(get-date)
@@ -230,6 +300,10 @@ function Invoke-With-Retry([ScriptBlock]$ScriptBlock, [System.Threading.Cancella
     }
 }
 
+# ---- 检测当前机器的 CPU 架构 ----
+# 返回值: amd64 / x64 / x86 / arm64 / arm
+# 注意：32 位 PowerShell 在 64 位系统上会误报为 x86，
+# 所以需要先检查 PROCESSOR_ARCHITEW6432 环境变量
 function Get-Machine-Architecture() {
     Say-Invocation $MyInvocation
 
@@ -341,6 +415,8 @@ function Get-NormalizedProduct([string]$Runtime) {
     }
 }
 
+# ---- 检测是否有 tar 命令可用（Windows 10 1803+ 内置） ----
+# tar 命令用于解压 .tar.gz 格式的安装包（.NET 11+ 的默认格式）
 function Test-TarAvailable {
     if ($env:DOTNET_INSTALL_SKIP_TAR -eq "1") {
         Say-Verbose "Skipping tar detection due to DOTNET_INSTALL_SKIP_TAR environment variable."
@@ -400,6 +476,10 @@ function Load-Assembly([string] $Assembly) {
     }
 }
 
+# ---- 执行 HTTP GET 请求（核心下载函数） ----
+# 这是整个脚本最底层的 HTTP 通信函数，所有下载都通过它
+# 支持代理、重定向禁用、超时控制
+# 使用 HttpClient 而不是 Invoke-WebRequest（兼容 Nano Server）
 function GetHTTPResponse([Uri] $Uri, [bool]$HeaderOnly, [bool]$DisableRedirect, [bool]$DisableFeedCredential) {
     $cts = New-Object System.Threading.CancellationTokenSource
 
@@ -521,6 +601,9 @@ function GetHTTPResponse([Uri] $Uri, [bool]$HeaderOnly, [bool]$DisableRedirect, 
     }
 }
 
+# ---- 从 latest.version 文件获取最新版本号 ----
+# latest.version 是微软服务器上的一个文本文件，内容包含最新版本号
+# 例如：https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0/latest.version
 function Get-Version-From-LatestVersion-File([string]$AzureFeed, [string]$Channel) {
     Say-Invocation $MyInvocation
 
@@ -564,6 +647,9 @@ function Get-Version-From-LatestVersion-File([string]$AzureFeed, [string]$Channe
     return $VersionInfo
 }
 
+# ---- 从 global.json 文件解析 SDK 版本号 ----
+# global.json 是 .NET 项目的版本锁定文件
+# 示例内容：{ "sdk": { "version": "8.0.401" } }
 function Parse-Jsonfile-For-Version([string]$JSonFile) {
     Say-Invocation $MyInvocation
 
@@ -618,6 +704,9 @@ function Get-Specific-Version-From-Version([string]$AzureFeed, [string]$Channel,
     }
 }
 
+# ---- 构造 SDK 下载链接 ----
+# 根据版本号和架构拼接出完整下载 URL
+# 例如：https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.102/dotnet-sdk-10.0.102-win-x64.zip
 function Get-Download-Link([string]$AzureFeed, [string]$SpecificVersion, [string]$CLIArchitecture) {
     Say-Invocation $MyInvocation
 
@@ -984,6 +1073,8 @@ function Extract-Dotnet-Package-Tar([string]$TarPath, [string]$OutPath) {
     }
 }
 
+# ---- 下载文件到本地 ----
+# 支持远程 HTTP 下载和本地文件复制两种模式
 function DownloadFile($Source, [string]$OutPath) {
     if ($Source -notlike "http*") {
         #  Using System.IO.Path.GetFullPath to get the current directory
@@ -1289,6 +1380,9 @@ function Prepare-Install-Directory {
     }
 }
 
+# ==================================================================
+#  主执行流程（脚本从这里正式开始运行）
+# ==================================================================
 if ($Help) {
     Get-Help $PSCommandPath -Examples
     exit
@@ -1305,6 +1399,7 @@ if ($SharedRuntime -and (-not $Runtime)) {
 
 $OverrideNonVersionedFiles = !$SkipNonVersionedFiles
 
+# ---- 产品发现：确定要安装什么 ----
 Measure-Action "Product discovery" {
     $script:CLIArchitecture = Get-CLIArchitecture-From-Architecture $Architecture
     $script:NormalizedQuality = Get-NormalizedQuality $Quality
@@ -1318,6 +1413,7 @@ Measure-Action "Product discovery" {
     Say-Verbose "Tar available: '$TarAvailable'"
 }
 
+# ---- 确定安装根目录 ----
 $InstallRoot = Resolve-Installation-Path $InstallDir
 if (-not (Test-User-Write-Access $InstallRoot)) {
     Say-Error "The current user doesn't have write access to the installation root '$InstallRoot' to install .NET. Please try specifying a different installation directory using the -InstallDir parameter, or ensure the selected directory has the appropriate permissions."
@@ -1327,6 +1423,7 @@ Say-Verbose "InstallRoot: $InstallRoot"
 $ScriptName = $MyInvocation.MyCommand.Name
 ($assetName, $dotnetPackageRelativePath) = Resolve-AssetName-And-RelativePath -Runtime $Runtime
 
+# ---- 获取下载源列表（默认微软官方，可替换） ----
 $feeds = Get-Feeds-To-Use
 $DownloadLinks = @()
 
@@ -1334,7 +1431,8 @@ if ($Version.ToLowerInvariant() -ne "latest" -and -not [string]::IsNullOrEmpty($
     throw "Quality and Version options are not allowed to be specified simultaneously. See https:// learn.microsoft.com/dotnet/core/tools/dotnet-install-script#options for details."
 }
 
-# aka.ms links can only be used if the user did not request a specific version via the command line or a global.json file.
+# ---- 尝试通过 aka.ms 短链接获取下载地址（适用于 latest 版本） ----
+# aka.ms 是微软的短链接服务，会自动重定向到实际下载地址
 if ([string]::IsNullOrEmpty($JSonFile) -and ($Version -eq "latest")) {
     ($DownloadLink, $SpecificVersion, $EffectiveVersion) = Get-AkaMsLink-And-Version $NormalizedChannel $NormalizedQuality $Internal $NormalizedProduct $CLIArchitecture
     
@@ -1353,8 +1451,8 @@ if ([string]::IsNullOrEmpty($JSonFile) -and ($Version -eq "latest")) {
     }
 }
 
-# Primary and legacy links cannot be used if a quality was specified.
-# If we already have an aka.ms link, no need to search the blob feeds.
+# ---- 兜底方案：通过 latest.version 文件获取下载链接 ----
+# 如果 aka.ms 方式失败，或者用户指定了具体版本号
 if ([string]::IsNullOrEmpty($NormalizedQuality) -and 0 -eq $DownloadLinks.count) {
     foreach ($feed in $feeds) {
         try {
@@ -1372,6 +1470,7 @@ if ([string]::IsNullOrEmpty($NormalizedQuality) -and 0 -eq $DownloadLinks.count)
     
             if (-Not $DryRun) {
                 Say-Verbose "Checking if the version $EffectiveVersion is already installed"
+                # ---- 已安装且版本相同 → 直接退出 ----
                 if (Is-Dotnet-Package-Installed -InstallRoot $InstallRoot -RelativePathToPackage $dotnetPackageRelativePath -SpecificVersion $EffectiveVersion) {
                     Say "$assetName with version '$EffectiveVersion' is already installed."
                     Prepend-Sdk-InstallRoot-To-Path -InstallRoot $InstallRoot
@@ -1385,6 +1484,7 @@ if ([string]::IsNullOrEmpty($NormalizedQuality) -and 0 -eq $DownloadLinks.count)
     }
 }
 
+# ---- 没有找到任何可用下载链接 → 报错退出 ----
 if ($DownloadLinks.count -eq 0) {
     throw "Failed to resolve the exact version number."
 }
@@ -1396,6 +1496,8 @@ if ($DryRun) {
 
 Measure-Action "Installation directory preparation" { Prepare-Install-Directory }
 
+# ---- 开始下载安装包 ----
+# 按优先级依次尝试各个下载链接，任何一个成功就停止
 Say-Verbose "Zip path: $ZipPath"
 
 $DownloadSucceeded = $false
@@ -1443,6 +1545,8 @@ if (-not $DownloadSucceeded) {
     throw "Could not find `"$assetName`" with version = $($DownloadLinks[0].effectiveVersion)`nRefer to: https://aka.ms/dotnet-os-lifecycle for information on .NET support"
 }
 
+# ---- 解压安装包 ----
+# .NET 11+ 使用 tar.gz 格式，旧版本使用 zip 格式
 Say "Extracting the archive."
 if ($DownloadedLink.downloadLink.EndsWith(".tar.gz")) {
     Measure-Action "Package extraction" { Extract-Dotnet-Package-Tar -TarPath $ZipPath -OutPath $InstallRoot }
@@ -1473,12 +1577,15 @@ if (!$isAssetInstalled) {
     throw "`"$assetName`" with version = $($DownloadedLink.effectiveVersion) failed to install with an unknown error."
 }
 
+# ---- 清理临时 ZIP 文件 ----
 if (-not $KeepZip) {
     SafeRemoveFile -Path $ZipPath
 }
 
+# ---- 将安装目录加入 PATH 环境变量 ----
 Measure-Action "Setting up shell environment" { Prepend-Sdk-InstallRoot-To-Path -InstallRoot $InstallRoot }
 
+# ---- 安装完成！ ----
 Say "Note that the script does not ensure your Windows version is supported during the installation."
 Say "To check the list of supported versions, go to https://learn.microsoft.com/dotnet/core/install/windows#supported-versions"
 Say "Installed version is $($DownloadedLink.effectiveVersion)"
