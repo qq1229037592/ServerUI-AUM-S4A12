@@ -222,19 +222,8 @@ public class SelfUpdateService
                 return;
             }
 
-            // R4 文件同步: 覆盖本地源码
-            OutputReceived?.Invoke("[AUM更新] 正在同步源码文件...");
-            SyncDirectory(srcDir, localDir);
-
-            // R4.5 清理重复文件: GitHub 仓库可能存在根目录和子目录同名文件
-            CleanDuplicates(localDir);
-
-            // R4.6 同步仓库根目录脚本文件: update.ps1 / bat 等也会更新
-            OutputReceived?.Invoke("[AUM更新] 正在同步脚本文件...");
-            SyncRootFiles(rootDir, Path.GetDirectoryName(localDir) ?? localDir);
-
-            // R5 dotnet restore
-            OutputReceived?.Invoke("[AUM更新] 正在还原依赖...");
+            // R4 直接在下载的源码上编译（不动本地文件，确保编译源正确）
+            OutputReceived?.Invoke("[AUM更新] 正在编译新版本（直接从GitHub源码）...");
             var sdk = FindDotNet();
             if (sdk == null)
             {
@@ -243,7 +232,13 @@ public class SelfUpdateService
                 return;
             }
 
-            var exit = await RunDotnet(sdk, $"restore \"{Path.Combine(localDir, "ServerUI.csproj")}\" --ignore-failed-sources", localDir);
+            // 清理重复文件
+            CleanDuplicates(srcDir);
+
+            // R5 dotnet restore
+            OutputReceived?.Invoke("[AUM更新] 正在还原依赖...");
+            var projFile = Path.Combine(srcDir, "ServerUI.csproj");
+            var exit = await RunDotnet(sdk, $"restore \"{projFile}\" --ignore-failed-sources", srcDir);
             if (exit != 0)
             {
                 OutputReceived?.Invoke("[AUM更新] 依赖还原失败 (exit " + exit + ")。");
@@ -253,11 +248,10 @@ public class SelfUpdateService
 
             // R6 dotnet publish (无依赖版)
             OutputReceived?.Invoke("[AUM更新] 正在编译新版本...");
-            var csproj = Path.Combine(localDir, "ServerUI.csproj");
             var fdExePath = Path.Combine(publishDir, "ServerUI.exe");
             exit = await RunDotnet(sdk,
-                $"publish \"{csproj}\" -c Release -r win-x64 --no-self-contained -o \"{publishDir}\"",
-                localDir);
+                $"publish \"{projFile}\" -c Release -r win-x64 --no-self-contained -o \"{publishDir}\"",
+                srcDir);
 
             if (exit != 0)
             {
@@ -281,6 +275,9 @@ public class SelfUpdateService
                 Completed?.Invoke(false);
                 return;
             }
+
+            // R7.5 编译成功后，同步源码到本地（异步，不影响替换流程）
+            try { SyncDirectory(srcDir, localDir); CleanDuplicates(localDir); SyncRootFiles(rootDir, Path.GetDirectoryName(localDir) ?? localDir); } catch { }
 
             // R8 生成替换脚本并退出
             // 用临时 PowerShell 脚本实现: 等旧进程退出 → 覆盖 EXE → 启动 → 自清理
@@ -382,6 +379,28 @@ public class SelfUpdateService
 
         using var p = new Process { StartInfo = psi };
         p.Start();
+
+        // 必须异步读取输出，否则缓冲区满会导致进程卡死
+        var act = OutputReceived;
+        _ = Task.Run(() =>
+        {
+            while (!p.StandardOutput.EndOfStream)
+            {
+                var line = p.StandardOutput.ReadLine();
+                if (line != null && line.Length > 0)
+                    act?.Invoke("[编译] " + line);
+            }
+        });
+        _ = Task.Run(() =>
+        {
+            while (!p.StandardError.EndOfStream)
+            {
+                var line = p.StandardError.ReadLine();
+                if (line != null && line.Length > 0)
+                    act?.Invoke("[编译] " + line);
+            }
+        });
+
         await p.WaitForExitAsync();
         return p.ExitCode;
     }
