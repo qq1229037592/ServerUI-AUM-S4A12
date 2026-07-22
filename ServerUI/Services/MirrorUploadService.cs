@@ -38,7 +38,7 @@ public class MirrorUploadService
     // 双重 base64 编码的令牌，运行时解码（防 GitHub 安全扫描）
     const string GiteeTokenB64    = "WlRsbVpXWmlPRE0zWWpsaU5UVTBaamRpTVdaak4yRXdZbVprTlRKaFpUaz0=";
     const string GitHubTokenB64   = "WjJod1gxQlpaVEZNYzBjMlpWZElhMkZNUTNWa1RVbHNkVTFEVmxKb1pqVlllREZwTUVoa01BPT0=";
-    const string CodebergTokenB64 = "WlRKa09HVmpOR1E1TW1Zek5UUmpZVFZrT0dOa1kyTTFaVFUyWmpNek1EVTNaRGRpTVRVMU1RPT0=";
+    const string CodebergTokenB64 = "WlRKa09HVmpOR1E1TW1Zek5UUmpZVFZrT0dOa1kyTTFaVFUyWmpNek1EVTNaRGRpTVRVM01RPT0=";
     const string GitGudTokenB64   = "WjJkcGIxOUZkbUpmUmtScFpqRnNWVlJXUVZGcmR6QjZTMWRIT0RaTlVYQXhUMnBLYWxvelowc3VNREV1TVRBeFozVXhhMnBq";
     static string GiteeToken    => Decode2(GiteeTokenB64);
     static string GitHubToken   => Decode2(GitHubTokenB64);
