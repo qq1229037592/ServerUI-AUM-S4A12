@@ -65,14 +65,18 @@ if ($cmp -le 0) {
     Write-Host ""
     if ($cmp -lt 0) { Write-Host "当前版本 v$localVer 高于远程 v$remoteVer (开发版)，无需更新。" }
     else { Write-Host "已是最新版本 v$localVer。" }
-    Read-Host "按任意键退出"
-    exit 0
+    Write-Host ""
+    $choice = Read-Host "输入 1 强制重新下载编译，或直接回车退出"
+    if ($choice -ne "1") { Read-Host "按任意键退出"; exit 0 }
+    Write-Host "强制重新编译模式..."
 }
 
-Write-Host ""
-Write-Host "发现新版本 v$remoteVer！当前 v$localVer"
-$confirm = Read-Host "是否进行更新? (Y/N)"
-if ($confirm -ne "Y" -and $confirm -ne "y") { Write-Host "已取消。"; Read-Host "按任意键退出"; exit 0 }
+if ($cmp -gt 0) {
+    Write-Host ""
+    Write-Host "发现新版本 v$remoteVer！当前 v$localVer"
+    $confirm = Read-Host "是否进行更新? (Y/N)"
+    if ($confirm -ne "Y" -and $confirm -ne "y") { Write-Host "已取消。"; Read-Host "按任意键退出"; exit 0 }
+}
 
 Write-Host ""
 Write-Host "[3/5] 下载最新源码..."
@@ -187,8 +191,8 @@ Write-Host "  AUM-version.txt -> v$remoteVer"
 if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
 
 Write-Host ""
-Write-Host "========================================"
-Write-Host "  更新完成! v$localVer -> v$remoteVer"
+if ($cmp -gt 0) { Write-Host "  更新完成! v$localVer -> v$remoteVer" }
+else { Write-Host "  强制重编译完成! v$localVer (源码已刷新)" }
 Write-Host "========================================"
 Write-Host ""
 Read-Host "按任意键退出"
