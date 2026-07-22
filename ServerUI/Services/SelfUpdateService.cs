@@ -1,6 +1,6 @@
 /*
  * ==================================================================
- * AUM管理器自更新服务 (SelfUpdateService) — v1.911
+ * AUM管理器自更新服务 (SelfUpdateService) — v1.913
  * ==================================================================
  *
  * 【功能说明】
@@ -340,6 +340,7 @@ public class SelfUpdateService
 
     static string FindDotNet()
     {
+        // 第一级: 尝试系统 PATH 中的 dotnet
         try
         {
             var p = Process.Start(new ProcessStartInfo
@@ -348,8 +349,10 @@ public class SelfUpdateService
                 Arguments = "--version",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 CreateNoWindow = true
             });
+            if (p == null) throw new Exception("Process.Start returned null");
             var v = p.StandardOutput.ReadToEnd().Trim();
             p.WaitForExit();
             var m = Regex.Match(v, @"^(\d+)\.");
@@ -358,8 +361,75 @@ public class SelfUpdateService
         }
         catch { }
 
-        var pf = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe");
-        if (File.Exists(pf)) return pf;
+        // 第二级: 用 where.exe 查找 dotnet.exe 所在位置
+        try
+        {
+            var p = Process.Start(new ProcessStartInfo
+            {
+                FileName = "where.exe",
+                Arguments = "dotnet",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            });
+            if (p == null) throw new Exception("Process.Start returned null");
+            var all = p.StandardOutput.ReadToEnd().Trim();
+            p.WaitForExit();
+            var lines = all.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var line in lines)
+            {
+                var path = line.Trim();
+                if (!File.Exists(path)) continue;
+                try
+                {
+                    var vp = Process.Start(new ProcessStartInfo
+                    {
+                        FileName = path,
+                        Arguments = "--version",
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        CreateNoWindow = true
+                    });
+                    if (vp == null) continue;
+                    var v = vp.StandardOutput.ReadToEnd().Trim();
+                    vp.WaitForExit();
+                    var m = Regex.Match(v, @"^(\d+)\.");
+                    if (vp.ExitCode == 0 && m.Success && int.Parse(m.Groups[1].Value) >= 10)
+                        return path;
+                }
+                catch { }
+            }
+        }
+        catch { }
+
+        // 第三级: 标准安装目录 (x64 + x86)
+        var candidates = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "dotnet", "dotnet.exe"),
+        };
+        foreach (var pf in candidates)
+        {
+            if (!File.Exists(pf)) continue;
+            try
+            {
+                var p = Process.Start(new ProcessStartInfo
+                {
+                    FileName = pf,
+                    Arguments = "--version",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                });
+                if (p == null) continue;
+                var v = p.StandardOutput.ReadToEnd().Trim();
+                p.WaitForExit();
+                var m = Regex.Match(v, @"^(\d+)\.");
+                if (p.ExitCode == 0 && m.Success && int.Parse(m.Groups[1].Value) >= 10)
+                    return pf;
+            }
+            catch { }
+        }
 
         return null;
     }

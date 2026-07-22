@@ -1,6 +1,6 @@
 /*
  * ==================================================================
- *     主窗口类 (MainForm.cs) — ServerS4A12 GUI 管理器 v1.911
+ *     主窗口类 (MainForm.cs) — ServerS4A12 GUI 管理器 v1.913
  * ==================================================================
  *
  * 【功能概览】
@@ -112,8 +112,8 @@ public partial class MainForm : Form
 
     // VER = 当前工具版本号 — 显示在窗口标题和启动日志中
     // 每次发版时只需修改这一个值
-    // 【v1.911】新增众包镜像更新系统，多仓库容灾
-    const string VER = "1.911";
+    // 【v1.913】修复 .NET 10 SDK 检测，改进自更新
+    const string VER = "1.913";
 
     // ===== 路径计算 =====
     // _bd = EXE 所在目录 (BaseDirectory)
@@ -1920,16 +1920,17 @@ public partial class MainForm : Form
         }
         catch { }
 
-        // 第二级: Program Files\dotnet (常见安装位置)
+        // 第二级: Program Files\dotnet (常见安装位置, x64)
         if (!sysOk)
         {
-            try
+            var pfPaths = new[] {
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "dotnet", "dotnet.exe")
+            };
+            foreach (var pfPath in pfPaths)
             {
-                var pfPath = Path.Combine(
-                    Environment.GetFolderPath(
-                        Environment.SpecialFolder.ProgramFiles),
-                    "dotnet", "dotnet.exe");
-                if (File.Exists(pfPath))
+                if (!File.Exists(pfPath)) continue;
+                try
                 {
                     var p = new Process
                     {
@@ -1949,11 +1950,11 @@ public partial class MainForm : Form
                         && v.StartsWith("10."))
                     {
                         sdk = "已就绪 v" + v + " (Program Files)";
-                        c = Gn; pfOk = true;
+                        c = Gn; pfOk = true; break;
                     }
                 }
+                catch { }
             }
-            catch { }
         }
 
         // 第三级: 本地 dotnet-sdk 目录 (便携 SDK)
@@ -2167,7 +2168,15 @@ public partial class MainForm : Form
     async System.Threading.Tasks.Task IS()
     {
         btSdk.Enabled = false;
-        btSdk.Text = "打开安装程序...";
+        btSdk.Text = "检测中...";
+
+        if (_hasSdk)
+        {
+            Lg(".NET 10 SDK 已就绪，无需重新安装。", Gn);
+            btSdk.Enabled = true;
+            btSdk.Text = "安装SDK";
+            return;
+        }
 
         var installer = Path.Combine(_ad, "dotnet-sdk",
             "dotnet-sdk-10.0.302-win-x64.exe");
@@ -2175,6 +2184,7 @@ public partial class MainForm : Form
         if (!File.Exists(installer))
         {
             Lg("未找到 .NET 10 SDK 安装程序: " + installer, Rd);
+            Lg("请自行下载 .NET 10.0 SDK (x64) 安装包放入 dotnet-sdk 目录，或运行 dotnet-install.ps1。", Rd);
             btSdk.Enabled = true;
             btSdk.Text = "安装SDK";
             return;
