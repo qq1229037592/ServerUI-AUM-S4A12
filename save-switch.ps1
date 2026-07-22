@@ -1,4 +1,4 @@
-﻿# v1.916: 存档管理脚本 — 列出切换库中所有 .db 存档、切换/保存操作，操作时自动停服/重启
+﻿# v1.917: 存档管理脚本 — 列出切换库中所有 .db 存档、切换/保存操作，操作时自动停服/重启
 $ErrorActionPreference = "Continue"
 $ScriptRoot = $PSScriptRoot
 $SwitchDir = Join-Path $ScriptRoot "存档管理\切换库"

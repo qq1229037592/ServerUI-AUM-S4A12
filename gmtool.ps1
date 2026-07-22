@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  DfoGmTool - GM工具 独立启动脚本 (v1.8)
+#  DfoGmTool - GM工具 独立启动脚本 (v1.83)
 #  写法完全对齐 ServerUI 里 btGm 的启动逻辑:
 #    gmp = AUM管理组件\dfogmtool\publish\DfoGmTool.exe
 #    sb  = AUM管理组件\ServerS4A12-AUM\dist\win-x64
