@@ -678,7 +678,7 @@ public partial class MainForm : Form
             var d = Path.Combine(_ad, "ServerS4A12-AUM", "dist",
                 "win-x64", "Data", "Pvf");
             if (Directory.Exists(d))
-                Process.Start("explorer.exe", d);
+                Process.Start(new ProcessStartInfo { FileName = "explorer.exe", Arguments = d, UseShellExecute = true });
             else
                 Lg("PVF目录不存在", Color.Gold);
         };
@@ -949,7 +949,7 @@ public partial class MainForm : Form
         {
             var d = Path.Combine(_ad, "存档管理", "切换库");
             Directory.CreateDirectory(d);
-            Process.Start("explorer.exe", d);
+            Process.Start(new ProcessStartInfo { FileName = "explorer.exe", Arguments = d, UseShellExecute = true });
             Lg(">>> 打开了切换存档目录", Color.CornflowerBlue);
         };
         // 打开备份存档目录
@@ -957,7 +957,7 @@ public partial class MainForm : Form
         {
             var d = Path.Combine(_ad, "存档管理", "备份存档");
             Directory.CreateDirectory(d);
-            Process.Start("explorer.exe", d);
+            Process.Start(new ProcessStartInfo { FileName = "explorer.exe", Arguments = d, UseShellExecute = true });
             Lg(">>> 打开了备份存档目录", Color.CornflowerBlue);
         };
         // 打开主存档目录 (Data 目录)
@@ -967,7 +967,7 @@ public partial class MainForm : Form
                 "dist", "win-x64", "Data");
             if (Directory.Exists(d))
             {
-                Process.Start("explorer.exe", d);
+                Process.Start(new ProcessStartInfo { FileName = "explorer.exe", Arguments = d, UseShellExecute = true });
                 Lg(">>> 打开了主存档目录", Color.CornflowerBlue);
             }
             else Lg("主存档目录不存在", Color.Gold);
@@ -1282,7 +1282,7 @@ public partial class MainForm : Form
         lm.LinkClicked += (s, e) =>
         {
             Lg(">>> 打开 GitHub 镜像仓库", Color.CornflowerBlue);
-            Process.Start("explorer.exe", UpdateService.MirrorGitHubPage);
+            Process.Start(new ProcessStartInfo { FileName = "explorer.exe", Arguments = UpdateService.MirrorGitHubPage, UseShellExecute = true });
         };
 
         // 仓库链接 (GitGud + Codeberg, 使用强调色)
@@ -1297,7 +1297,7 @@ public partial class MainForm : Form
         lr.LinkClicked += (s, e) =>
         {
             Lg(">>> 打开仓库链接", Color.CornflowerBlue);
-            Process.Start("explorer.exe", "https://gitgud.io/rewio/86JP");
+            Process.Start(new ProcessStartInfo { FileName = "explorer.exe", Arguments = "https://gitgud.io/rewio/86JP", UseShellExecute = true });
         };
 
         r3.Controls.Add(lg, 0, 0);
@@ -1803,7 +1803,12 @@ public partial class MainForm : Form
     {
         var lf = Path.Combine(_ad, "更新日志.txt");
         if (File.Exists(lf))
-            Process.Start("notepad.exe", lf);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "notepad.exe",
+                Arguments = lf,
+                UseShellExecute = true
+            });
         else
             MessageBox.Show(
                 "暂时没有更新日志，请注意查看版本信息。",
