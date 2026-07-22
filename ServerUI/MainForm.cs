@@ -1803,12 +1803,7 @@ public partial class MainForm : Form
     {
         var lf = Path.Combine(_ad, "更新日志.txt");
         if (File.Exists(lf))
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "notepad.exe",
-                Arguments = lf,
-                UseShellExecute = true
-            });
+            Process.Start(new ProcessStartInfo { FileName = lf, UseShellExecute = true });
         else
             MessageBox.Show(
                 "暂时没有更新日志，请注意查看版本信息。",
