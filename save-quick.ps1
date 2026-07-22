@@ -1,4 +1,4 @@
-﻿# v1.916: 快速换挡脚本 — 拖拽 .db 文件替换 inventory.db，自动停服/重启
+﻿# v1.917: 快速换挡脚本 — 拖拽 .db 文件替换 inventory.db，自动停服/重启
 $ErrorActionPreference = "Continue"
 $ScriptRoot = $PSScriptRoot
 $SrcFile = $args[0]

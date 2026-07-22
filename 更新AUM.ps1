@@ -1,10 +1,10 @@
-﻿# v1.916: AUM 管理器自更新脚本
+﻿# v1.917: AUM 管理器自更新脚本
 $ErrorActionPreference = "Continue"
 $ScriptRoot = $PSScriptRoot
 
 Write-Host ""
 Write-Host "========================================"
-Write-Host "  AUM 管理器自更新 v1.916"
+Write-Host "  AUM 管理器自更新 v1.917"
 Write-Host "========================================"
 Write-Host ""
 

@@ -10,10 +10,10 @@
     <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
-    <Version>1.916.0</Version>
-    <AssemblyVersion>1.916.0.0</AssemblyVersion>
-    <FileVersion>1.916.0.0</FileVersion>
-    <InformationalVersion>1.916</InformationalVersion>
+    <Version>1.917.0</Version>
+    <AssemblyVersion>1.917.0.0</AssemblyVersion>
+    <FileVersion>1.917.0.0</FileVersion>
+    <InformationalVersion>1.917</InformationalVersion>
     <ApplicationIcon>图标EXE.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
