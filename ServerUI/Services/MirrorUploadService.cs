@@ -140,7 +140,7 @@ public class MirrorUploadService
                             using var lockDoc = JsonDocument.Parse(lockContent);
                             if (lockDoc.RootElement.TryGetProperty("timestamp", out var tsEl))
                             {
-                                var lockTime = DateTime.Parse(tsEl.GetString()!);
+                                var lockTime = DateTime.Parse(tsEl.GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind);
                                 var elapsed = DateTime.UtcNow - lockTime;
                                 if (elapsed.TotalSeconds < LockTimeout)
                                 {
