@@ -2366,14 +2366,36 @@ public partial class MainForm : Form
             if (_au.RemoteVersion != null)
             {
                 if (_au.CompareVersion(_au.RemoteVersion, VER) < 0)
-                    Lg("[AUM更新] 当前已是开发版 v" + VER + "，无需降级。", Txt2);
+                {
+                    Lg("[AUM更新] 当前已是开发版 v" + VER + "（高于仓库 v" + _au.RemoteVersion + "）。", Txt2);
+                    var devR = MessageBox.Show(
+                        "当前版本 v" + VER + " 高于仓库版本 v" + _au.RemoteVersion + "（开发版）。\n\n是否强制从仓库拉取源码重新编译？",
+                        "AUM自更新", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    if (devR != DialogResult.Yes) return;
+                }
                 else
-                    Lg("[AUM更新] 已是最新版本 v" + VER, Gn);
+                {
+                    Lg("[AUM更新] 已是最新版本 v" + VER + "，是否强制重新编译？", Or);
+                    var sameR = MessageBox.Show(
+                        "当前已是最新版本 v" + VER + "。\n\n点击【是】强制从仓库拉取源码重新编译（同步最新改动）。\n点击【否】跳过。",
+                        "AUM自更新", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    if (sameR != DialogResult.Yes) return;
+                }
             }
-            return;
+            else
+            {
+                // RemoteVersion 为 null 表示网络失败，但仍允许手动触发
+                var netR = MessageBox.Show(
+                    "无法连接 GitHub 检测版本。\n\n点击【是】仍然尝试从仓库拉取源码编译。\n点击【否】取消。",
+                    "AUM自更新", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (netR != DialogResult.Yes) return;
+            }
+        }
+        else
+        {
+            Lg("[AUM更新] 发现新版本 v" + _au.RemoteVersion + "，当前 v" + VER, Gn);
         }
 
-        Lg("[AUM更新] 发现新版本 v" + _au.RemoteVersion + "，当前 v" + VER, Gn);
         Lg("[AUM更新] 开始自动下载源码并编译...", Color.CornflowerBlue);
 
         _au.OutputReceived += Lg;
