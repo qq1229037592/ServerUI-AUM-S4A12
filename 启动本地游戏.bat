@@ -11,10 +11,10 @@ title DNF 单机游戏 - 启动脚本
 set "BASE=%~dp0"
 
 rem 保存当前 cmd.exe 的 PID，后台监控用
-powershell -NoProfile -ExecutionPolicy Bypass -File "%BASE%get_pid.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%BASE%ps1核心\get_pid.ps1"
 
 rem 后台监控: 窗口关闭时关闭服务端
-start /b "" powershell -NoProfile -ExecutionPolicy Bypass -File "%BASE%dnf_monitor.ps1"
+start /b "" powershell -NoProfile -ExecutionPolicy Bypass -File "%BASE%ps1核心\dnf_monitor.ps1"
 
 echo ========================================
 echo   DNF 单机游戏 - 一键启动脚本

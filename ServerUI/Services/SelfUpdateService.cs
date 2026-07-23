@@ -277,7 +277,7 @@ public class SelfUpdateService
             }
 
             // R7.5 编译成功后，同步源码到本地（异步，不影响替换流程）
-            try { SyncDirectory(srcDir, localDir); CleanDuplicates(localDir); SyncRootFiles(rootDir, Path.GetDirectoryName(localDir) ?? localDir); } catch { }
+            try { SyncDirectory(srcDir, localDir); CleanDuplicates(localDir); SyncRootFiles(rootDir, Path.GetDirectoryName(localDir) ?? localDir); ReorganizeScripts(Path.GetDirectoryName(localDir) ?? localDir); } catch { }
 
             // R7.6 下载镜像中的更新日志（不编译，直接拉取）
             try { await DownloadChangelogFromMirror(Path.GetDirectoryName(localDir) ?? localDir); } catch { }
@@ -510,8 +510,9 @@ public class SelfUpdateService
 
     static void SyncRootFiles(string repoRoot, string userRoot)
     {
-        var exts = new[] { "*.ps1", "*.bat", "*.txt", "*.md" };
-        foreach (var pattern in exts)
+        // .bat / .txt / .md → userRoot (直接在 AUM管理组件 根目录)
+        var extsBat = new[] { "*.bat", "*.txt", "*.md" };
+        foreach (var pattern in extsBat)
         {
             foreach (var f in Directory.GetFiles(repoRoot, pattern))
             {
@@ -523,18 +524,131 @@ public class SelfUpdateService
                 if (File.Exists(dest))
                 {
                     var dstInfo = new FileInfo(dest);
-                    // 第1级: 大小 + 时间戳完全相同 → 跳过
                     if (srcInfo.Length == dstInfo.Length
                         && srcInfo.LastWriteTimeUtc == dstInfo.LastWriteTimeUtc)
                         continue;
-                    // 第2级: 元数据不同 → SHA-256 比对内容
                     if (FileHash(f) == FileHash(dest))
                         continue;
                 }
-                // 第3级: 内容确实不同(或本地不存在) → 复制
                 File.Copy(f, dest, true);
             }
         }
+
+        // .ps1 → userRoot\ps1核心\ (全部放入 ps1核心 子目录)
+        var ps1Dir = Path.Combine(userRoot, "ps1核心");
+        Directory.CreateDirectory(ps1Dir);
+        foreach (var f in Directory.GetFiles(repoRoot, "*.ps1"))
+        {
+            var name = Path.GetFileName(f);
+            var dest = Path.Combine(ps1Dir, name);
+            var srcInfo = new FileInfo(f);
+
+            if (File.Exists(dest))
+            {
+                var dstInfo = new FileInfo(dest);
+                if (srcInfo.Length == dstInfo.Length
+                    && srcInfo.LastWriteTimeUtc == dstInfo.LastWriteTimeUtc)
+                    continue;
+                if (FileHash(f) == FileHash(dest))
+                    continue;
+            }
+            File.Copy(f, dest, true);
+        }
+    }
+
+    /// <summary>
+    /// 更新AUM完成后执行文件重组：
+    ///   1. 确保 ps1核心 目录存在, 将根目录下 .ps1 全部移入
+    ///   2. 更新所有 .bat 中对 .ps1 的引用路径 → ps1核心\
+    ///   3. 清理游戏根目录下的冗余 .bat/.ps1 文件
+    /// </summary>
+    static void ReorganizeScripts(string aumDir)
+    {
+        try
+        {
+            var ps1Dir = Path.Combine(aumDir, "ps1核心");
+            Directory.CreateDirectory(ps1Dir);
+
+            // 1. 将 AUM管理组件 根目录下散落的 .ps1 移入 ps1核心
+            foreach (var f in Directory.GetFiles(aumDir, "*.ps1"))
+            {
+                var name = Path.GetFileName(f);
+                var dest = Path.Combine(ps1Dir, name);
+                if (!File.Exists(dest))
+                {
+                    File.Move(f, dest);
+                }
+                else
+                {
+                    if (FileHash(f) != FileHash(dest))
+                        File.Copy(f, dest, true);
+                    File.Delete(f);
+                }
+            }
+
+            // 2. 更新所有 .bat 文件中 .ps1 引用路径
+            foreach (var f in Directory.GetFiles(aumDir, "*.bat"))
+            {
+                UpdateBatReference(f);
+            }
+
+            // 3. 清理游戏根目录（AUM管理组件的父目录）下的冗余 .bat/.ps1
+            var gameRoot = Directory.GetParent(aumDir)?.FullName;
+            if (gameRoot != null && gameRoot != aumDir)
+            {
+                foreach (var f in Directory.GetFiles(gameRoot, "*.bat"))
+                {
+                    var name = Path.GetFileName(f);
+                    if (name.Contains("GameLog") || name.Contains("运行日志") || name.Contains("DNF")) continue;
+                    if (File.Exists(Path.Combine(aumDir, name)))
+                    {
+                        try { File.Delete(f); } catch { }
+                    }
+                }
+                foreach (var f in Directory.GetFiles(gameRoot, "*.ps1"))
+                {
+                    try { File.Delete(f); } catch { }
+                }
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// 将 .bat 文件中 %~dp0xxx.ps1 或 %BASE%xxx.ps1 更新为 %~dp0ps1核心\xxx.ps1
+    /// 自动检测 GBK/UTF-8 编码，不做编码转换
+    /// </summary>
+    static void UpdateBatReference(string batPath)
+    {
+        try
+        {
+            var bytes = File.ReadAllBytes(batPath);
+
+            // 先尝试 UTF-8 解码
+            var text = Encoding.UTF8.GetString(bytes);
+            var hasPs1Ref = text.Contains(".ps1", StringComparison.OrdinalIgnoreCase);
+            var enc = Encoding.UTF8;
+
+            // 如果 UTF-8 下找不到 .ps1 引用，换 GBK 重试
+            if (!hasPs1Ref)
+            {
+                text = Encoding.GetEncoding(936).GetString(bytes);
+                hasPs1Ref = text.Contains(".ps1", StringComparison.OrdinalIgnoreCase);
+                if (hasPs1Ref) enc = Encoding.GetEncoding(936);
+            }
+
+            // 已包含 ps1核心 或完全不引用 .ps1 → 跳过
+            if (text.Contains("ps1核心") || !hasPs1Ref)
+                return;
+
+            text = Regex.Replace(text,
+                @"(%~dp0|%BASE%)([^""'\\\s]+?\.ps1)",
+                "$1" + "ps1核心" + "\\$2",
+                RegexOptions.IgnoreCase);
+
+            File.WriteAllBytes(batPath, enc.GetBytes(text));
+        }
+        catch { }
     }
 
     static string FileHash(string path)

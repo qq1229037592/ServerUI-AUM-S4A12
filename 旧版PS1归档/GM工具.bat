@@ -7,7 +7,7 @@ REM  gmtool.ps1 mirrors ServerUI's GM-tool launch (workdir = publish).
 REM ============================================================
 cd /d "%~dp0"
 chcp 65001 >nul
-powershell -NoProfile -ExecutionPolicy Bypass -File "ps1核心\gmtool.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "gmtool.ps1"
 if errorlevel 1 (
     echo.
     echo [launcher] gmtool.ps1 exited with an error.

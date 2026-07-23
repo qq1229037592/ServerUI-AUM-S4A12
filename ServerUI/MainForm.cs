@@ -1524,17 +1524,14 @@ public partial class MainForm : Form
         else
             Lg(">>> 警告: 服务端可能未成功启动", Or);
 
-        // 启动游戏客户端
-        var p = Directory.GetParent(_bd);
-        var bat = p != null
-            ? Path.Combine(p.FullName, "本地游戏S4.bat")
-            : "";
+        // 启动游戏客户端 - 本地游戏S4.bat 现在在 AUM管理组件 内
+        var bat = Path.Combine(_ad, "本地游戏S4.bat");
         if (File.Exists(bat))
         {
             Process.Start(new ProcessStartInfo
             {
                 FileName = bat,
-                WorkingDirectory = p.FullName,
+                WorkingDirectory = _ad,
                 UseShellExecute = true
             });
             Lg(">>> 已打开本地游戏S4.bat", Gn);
@@ -2206,25 +2203,23 @@ public partial class MainForm : Form
         btSdk.Enabled = false;
         btSdk.Text = "检测中...";
 
-        if (_hasSdk)
-        {
-            Lg(".NET 10 SDK 已就绪，无需重新安装。", Gn);
-            btSdk.Enabled = true;
-            btSdk.Text = "安装SDK";
-            return;
-        }
-
         var installer = Path.Combine(_ad, "dotnet-sdk",
             "dotnet-sdk-10.0.302-win-x64.exe");
 
         if (!File.Exists(installer))
         {
-            Lg("未找到 .NET 10 SDK 安装程序: " + installer, Rd);
+            if (_hasSdk)
+                Lg(".NET 10 SDK 已就绪，但未找到安装包: " + installer, Or);
+            else
+                Lg("未找到 .NET 10 SDK 安装程序: " + installer, Rd);
             Lg("请自行下载 .NET 10.0 SDK (x64) 安装包放入 dotnet-sdk 目录，或运行 dotnet-install.ps1。", Rd);
             btSdk.Enabled = true;
             btSdk.Text = "安装SDK";
             return;
         }
+
+        if (_hasSdk)
+            Lg(".NET 10 SDK 已就绪，仍将打开安装包供你手动修复/覆盖安装。", Or);
 
         try
         {

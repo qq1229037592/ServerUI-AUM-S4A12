@@ -214,7 +214,7 @@ public class UpdateService
         var args = "";
         if (skipCommitLog) args += "-SkipCommitLog ";
         if (useMirror) args += "-UseMirror ";
-        await RunPowerShell(workDir, Path.Combine(scriptDir, "update.ps1"), args.Trim());
+        await RunPowerShell(workDir, Path.Combine(scriptDir, "ps1核心", "update.ps1"), args.Trim());
     }
 
     /*
@@ -228,7 +228,7 @@ public class UpdateService
         var args = "-FullSync";
         if (skipCommitLog) args += " -SkipCommitLog";
         if (useMirror) args += " -UseMirror";
-        await RunPowerShell(workDir, Path.Combine(scriptDir, "update.ps1"), args);
+        await RunPowerShell(workDir, Path.Combine(scriptDir, "ps1核心", "update.ps1"), args);
     }
 
     /*
