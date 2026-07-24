@@ -1524,14 +1524,17 @@ public partial class MainForm : Form
         else
             Lg(">>> 警告: 服务端可能未成功启动", Or);
 
-        // 启动游戏客户端 - 本地游戏S4.bat 现在在 AUM管理组件 内
-        var bat = Path.Combine(_ad, "本地游戏S4.bat");
+        // 启动游戏客户端 - 本地游戏S4.bat 在游戏根目录
+        var p = Directory.GetParent(_bd);
+        var bat = p != null
+            ? Path.Combine(p.FullName, "本地游戏S4.bat")
+            : "";
         if (File.Exists(bat))
         {
             Process.Start(new ProcessStartInfo
             {
                 FileName = bat,
-                WorkingDirectory = _ad,
+                WorkingDirectory = p.FullName,
                 UseShellExecute = true
             });
             Lg(">>> 已打开本地游戏S4.bat", Gn);
